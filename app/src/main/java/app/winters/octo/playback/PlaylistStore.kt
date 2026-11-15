@@ -1,6 +1,7 @@
 package app.winters.octo.playback
 
 import app.winters.octo.catalog.CatalogDao
+import app.winters.octo.catalog.OnlineDao
 import app.winters.octo.catalog.PlaylistEntity
 import app.winters.octo.catalog.PlaylistItemEntity
 import app.winters.octo.catalog.PlaylistSummary
@@ -27,6 +28,7 @@ import javax.inject.Singleton
 class PlaylistStore @Inject constructor(
     private val userDao: UserDao,
     private val catalog: CatalogDao,
+    private val online: OnlineDao,
     private val sync: PlaylistSync,
     sessions: SessionRepository,
 ) {
@@ -47,7 +49,7 @@ class PlaylistStore @Inject constructor(
         scope.launch {
             val now = System.currentTimeMillis()
             userDao.insertPlaylist(PlaylistEntity(id, name.trim(), createdAt = now, updatedAt = now))
-            if (trackIds.isNotEmpty()) userDao.addToPlaylist(id, catalog.tracksByIds(trackIds), now)
+            if (trackIds.isNotEmpty()) userDao.addToPlaylist(id, tracksWithFinds(catalog, online, trackIds), now)
             sync.created(id)
         }
         return id
@@ -71,7 +73,7 @@ class PlaylistStore @Inject constructor(
     // Adds songs to the end. `added` hears the new rows, to take them back out.
     fun add(id: String, trackIds: List<String>, added: (List<Long>) -> Unit = {}) {
         scope.launch {
-            val rows = userDao.addToPlaylist(id, catalog.tracksByIds(trackIds), System.currentTimeMillis())
+            val rows = userDao.addToPlaylist(id, tracksWithFinds(catalog, online, trackIds), System.currentTimeMillis())
             sync.changed(id)
             if (rows.isNotEmpty()) added(rows)
         }
