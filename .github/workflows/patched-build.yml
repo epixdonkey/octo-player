@@ -7,6 +7,14 @@
 # keystore file, base64), OCTO_PATCHED_KEYSTORE_PASSWORD, OCTO_PATCHED_KEY_ALIAS
 # and OCTO_PATCHED_KEY_PASSWORD. Every patched build must use the same key, or
 # phones refuse the update. The key itself never enters this repository.
+#
+# A run started by hand also passes the Brama (the Elephant's Gate): the brama
+# job below, which stands the patched APK beside the official 1.11.0 on an
+# emulator that talks to an octo bridge raised on the runner itself (octo, the
+# yt-dlp shim and a real Navidrome -- the live-smoke job's stack), and walks
+# the W1-W8 runtime checks of the find-in-playlists patch. A push only builds:
+# the Brama runs on dispatch alone. It needs no secrets of its own; the images
+# and the official APK are public.
 name: patched-build
 
 on:
@@ -77,3 +85,712 @@ jobs:
           name: octo-android-patched
           path: app/build/outputs/apk/patched/app-patched.apk
           if-no-files-found: error
+
+  # The Brama: the patched APK from this run's artifact, beside the official
+  # 1.11.0, on an emulator that talks to an octo bridge standing on the runner
+  # itself. The bridge is the live-smoke job's stack -- octo, the yt-dlp shim
+  # and a real Navidrome -- started with docker run on a network of their own
+  # rather than the server repo's full compose stack, which would drag slskd
+  # and octo-sonic in for nothing the gate reads. Every W step asserts on
+  # state: uiautomator dumps, pm list packages, REST probes against the
+  # bridge, logcat -- never pixels. One boundary is deliberate: streaming a
+  # found song from a datacenter IP always meets YouTube's bot wall (the
+  # live-smoke chronicle), so the gate proves the find lands and syncs, and
+  # playback itself belongs to the SOAK on a residential phone.
+  brama:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Everything the W steps share; not a secret among them.
+      BRAMA_RUN: brama-${{ github.run_id }}
+      OCTO_PORT: "5274"
+      OFFICIAL_APK: https://github.com/winters27/octo/releases/download/android-v1.11.0/Octo-1.11.0-android.apk
+
+    steps:
+      - name: The fork, for the boundary check
+        uses: actions/checkout@v7
+        with:
+          # W8 diffs origin/main..HEAD, so both sides' history has to be here.
+          fetch-depth: 0
+
+      - name: The patched APK from this run's build
+        uses: actions/download-artifact@v8
+        with:
+          name: octo-android-patched
+
+      # The bridge stack, after live-smoke.sh in the octo repo: a network,
+      # Navidrome with a self-made admin, the shim, and Octo pointing at both.
+      # Three sine tones, tagged by ffmpeg, give the library real songs -- two
+      # of them named for Mozart, so one search answers library rows and found
+      # songs together. The family side of the fork is switched on and given
+      # its #family prefix through the dashboard's own API, exactly as the
+      # earlier expedition's family gate did; the found songs' titles come
+      # from Octo's own search3 answer, which is the shape the app sees.
+      - name: The bridge stack
+        run: |
+          set -euo pipefail
+          PW="brama-$BRAMA_RUN-pass"
+          PW_HEX="$(printf '%s' "$PW" | od -An -tx1 | tr -d ' \n')"
+          MUSIC="$(mktemp -d)/music"
+          mkdir -p "$MUSIC"
+          i=1
+          for tone in "Mozart Bridge One 440" "Mozart Bridge Two 550" "Bridge Tone Three 660"; do
+            set -- $tone
+            title="$1 $2 $3"; freq="$4"
+            ffmpeg -loglevel error -f lavfi -i "sine=frequency=$freq:duration=30" \
+              -metadata title="$title" -metadata artist="Bridge Artist" -metadata album="Bridge Album" \
+              "$MUSIC/tone$i.mp3"
+            i=$((i+1))
+          done
+
+          docker network create "$BRAMA_RUN-net"
+          docker run -d --name "$BRAMA_RUN-navidrome" --network "$BRAMA_RUN-net" \
+            -e "ND_DEVAUTOCREATEADMINPASSWORD=$PW" \
+            -v "$MUSIC:/music" deluan/navidrome:latest
+          docker run -d --name "$BRAMA_RUN-shim" --network "$BRAMA_RUN-net" \
+            ghcr.io/epixdonkey/octo-yt-dlp-shim:dev
+          docker run -d --name "$BRAMA_RUN-octo" --network "$BRAMA_RUN-net" \
+            -p "127.0.0.1:$OCTO_PORT:8080" \
+            -e "Subsonic__Url=http://$BRAMA_RUN-navidrome:4533" \
+            -e "Subsonic__AdminUsername=admin" \
+            -e "Subsonic__AdminPassword=$PW" \
+            -e "Subsonic__StorageMode=Stream" \
+            -e "Subsonic__EnableSearchDiscovery=true" \
+            -e "YouTube__ShimUrl=http://$BRAMA_RUN-shim:8080" \
+            -v "$MUSIC:/music" \
+            ghcr.io/epixdonkey/octo:dev
+
+          base="http://localhost:$OCTO_PORT"
+          auth="u=admin&p=enc:$PW_HEX&v=1.16.1&c=brama&f=json"
+          for i in $(seq 1 60); do
+            curl -fsS --max-time 5 "$base/rest/ping.view?$auth" >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS "$base/rest/ping.view?$auth" | jq -e '.["subsonic-response"].status == "ok"' >/dev/null
+
+          # Navidrome scans the folder at start; the tones must be findable
+          # before the gate can stand them beside found songs.
+          n=0
+          for i in $(seq 1 90); do
+            n="$(curl -fsS "$base/rest/search3.view?query=Mozart%20Bridge&artistCount=0&albumCount=0&songCount=20&$auth" \
+              | jq '.["subsonic-response"].searchResult3.song // [] | length' 2>/dev/null || echo 0)"
+            [ "$n" -ge 2 ] 2>/dev/null && break
+            sleep 2
+          done
+          [ "$n" -ge 2 ] 2>/dev/null || { echo "::error::Navidrome never indexed the tones."; docker logs "$BRAMA_RUN-navidrome" 2>&1 | tail -20; exit 1; }
+          LIB1="$(curl -fsS "$base/rest/search3.view?query=Mozart%20Bridge%20One&artistCount=0&albumCount=0&songCount=5&$auth" \
+            | jq -r '.["subsonic-response"].searchResult3.song[0].id')"
+          LIB2="$(curl -fsS "$base/rest/search3.view?query=Mozart%20Bridge%20Two&artistCount=0&albumCount=0&songCount=5&$auth" \
+            | jq -r '.["subsonic-response"].searchResult3.song[0].id')"
+
+          # An existing library playlist, for W2's "into an existing one".
+          W2_NAME="Biblioteczna $BRAMA_RUN"
+          W2_ID="$(curl -fsS "$base/rest/createPlaylist.view?name=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$W2_NAME")&songId=$LIB1&songId=$LIB2&$auth" \
+            | jq -r '.["subsonic-response"].playlist.id')"
+
+          # Octo's own search3 answer names the found rows -- the same answer
+          # the app's search reads. Discovery asks the shim, which searches
+          # live YouTube fine from a datacenter IP; only /stream is walled.
+          SEARCH=""
+          for i in $(seq 1 45); do
+            SEARCH="$(curl -fsS --max-time 90 "$base/rest/search3.view?query=Mozart&artistCount=0&albumCount=0&songCount=30&$auth" || true)"
+            found="$(jq '[.["subsonic-response"].searchResult3.song // [] | .[] | select(.isExternal == true)] | length' <<<"$SEARCH" 2>/dev/null || echo 0)"
+            [ "${found:-0}" -ge 2 ] 2>/dev/null && break
+            sleep 3
+          done
+          if [ "${found:-0}" -lt 2 ] 2>/dev/null; then
+            echo "::error::Octo's search3 answered fewer than two outside songs. Answer: ${SEARCH:0:600}"
+            exit 1
+          fi
+          F1_TITLE="$(jq -r '[.["subsonic-response"].searchResult3.song[] | select(.isExternal == true)][0].title' <<<"$SEARCH")"
+          F2_TITLE="$(jq -r '[.["subsonic-response"].searchResult3.song[] | select(.isExternal == true)][1].title' <<<"$SEARCH")"
+
+          # Family on, with its #family prefix, through the dashboard's API.
+          jar="$RUNNER_TEMP/brama-family.jar"
+          curl -fsS -c "$jar" -X POST "$base/api/family/auth" -H 'Content-Type: application/json' -H 'X-Octo-Family: 1' \
+            -d "{\"username\":\"admin\",\"password\":\"$PW\"}" >/dev/null
+          curl -fsS -b "$jar" -X POST "$base/api/family/enable" -H 'Content-Type: application/json' -H 'X-Octo-Family: 1' \
+            -d '{"enabled":true}' | jq -e '.enabled == true' >/dev/null
+          curl -fsS -b "$jar" -X POST "$base/api/family/playlist-prefix" -H 'Content-Type: application/json' -H 'X-Octo-Family: 1' \
+            -d '{"prefix":"#family"}' | jq -e '.playlistPrefix == "#family"' >/dev/null
+
+          {
+            echo "BRAMA_PASS=$PW"
+            echo "BRAMA_AUTH=$auth"
+            echo "BRAMA_BASE=$base"
+            echo "W2_NAME=$W2_NAME"
+            echo "W2_ID=$W2_ID"
+            echo "F1_TITLE=$F1_TITLE"
+            echo "F2_TITLE=$F2_TITLE"
+            echo "LIB1_ID=$LIB1"
+            echo "LIB2_ID=$LIB2"
+          } >> "$GITHUB_ENV"
+          echo "Bridge up: playlist $W2_ID ($W2_NAME); found rows: $F1_TITLE / $F2_TITLE"
+
+      # The emulator, with the SDK's own tools, because the gate's spec pins
+      # the image: system-images;android-36;google_apis;x86_64 through
+      # sdkmanager, an AVD of a pixel, KVM on, boot waited out. The runner
+      # already carries the emulator and platform-tools; only the image is
+      # missing. The reactive-circus action would bring its own SDK setup and
+      # its own api-level opinion; this way the image is exactly the spec's.
+      - name: The emulator
+        run: |
+          set -euo pipefail
+          [ -e /dev/kvm ] || { echo "::error::This runner exposes no /dev/kvm; the gate cannot run an emulator here."; exit 1; }
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "system-images;android-36;google_apis;x86_64" >/dev/null
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n "$BRAMA_RUN" \
+            -k "system-images;android-36;google_apis;x86_64" --device pixel
+          nohup "$ANDROID_HOME/emulator/emulator" -avd "$BRAMA_RUN" \
+            -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -accel on \
+            -memory 3072 -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          adb wait-for-device
+          boot=""
+          for i in $(seq 1 300); do
+            boot="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            [ "$boot" = "1" ] && break
+            sleep 2
+          done
+          [ "$boot" = "1" ] || { echo "::error::The emulator never finished booting."; tail -40 "$RUNNER_TEMP/emulator.log"; exit 1; }
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard 2>/dev/null || true
+          adb devices
+
+      # W6 (R5): the official 1.11.0 from the developer's own release (the
+      # same APK the developer's F-Droid repository indexes), installed first;
+      # then the patched APK from this run's artifact, beside it, without a
+      # conflict; the official app still starts on its own sign-in page, its
+      # data untouched.
+      - name: W6 - the patched APK beside the official one
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/Octo-1.11.0-android.apk" "$OFFICIAL_APK"
+          adb install "$RUNNER_TEMP/Octo-1.11.0-android.apk" >/dev/null
+          adb install app-patched.apk >/dev/null
+          mkdir -p "$RUNNER_TEMP/brama-shots" "$RUNNER_TEMP/brama-dumps"
+          pkgs="$(adb shell pm list packages)"
+          echo "$pkgs" | grep -Fx "package:app.winters.octo" \
+            && echo "[W6] PASS: the official app.winters.octo is installed" \
+            || { echo "[W6] FAIL: the official app.winters.octo is missing"; exit 1; }
+          echo "$pkgs" | grep -Fx "package:app.winters.octo.patched" \
+            && echo "[W6] PASS: app.winters.octo.patched is installed beside it" \
+            || { echo "[W6] FAIL: app.winters.octo.patched is missing"; exit 1; }
+          adb shell am start -n app.winters.octo/app.winters.octo.MainActivity >/dev/null
+          sleep 5
+          adb shell uiautomator dump /sdcard/brama.xml >/dev/null 2>&1
+          adb pull /sdcard/brama.xml "$RUNNER_TEMP/brama-dumps/w6-official.xml" >/dev/null 2>&1
+          grep -q "Sign in" "$RUNNER_TEMP/brama-dumps/w6-official.xml" \
+            && echo "[W6] PASS: the official app starts, its own data untouched" \
+            || { echo "[W6] FAIL: the official app did not start."; exit 1; }
+          adb shell am force-stop app.winters.octo
+          adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/w6-official.png"
+          touch "$RUNNER_TEMP/wtable.md"
+          {
+            echo "| W6 | PASS | official 1.11.0 and the patched APK installed side by side, no conflict |"
+            echo "| W6 | PASS | pm list packages shows app.winters.octo and app.winters.octo.patched |"
+            echo "| W6 | PASS | the official app still starts on its own sign-in page |"
+          } >> "$RUNNER_TEMP/wtable.md"
+
+      # What the W steps share: a dump-and-tap helper over uiautomator, a
+      # Subsonic probe against the bridge, a verdict per line. State, never
+      # pixels: every tap lands on the centre of a node the dump names.
+      - name: The gate's helpers
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/brama-lib.sh" <<'LIB'
+          set -u
+          PASS=0; FAIL=0
+          APP=app.winters.octo.patched
+
+          check() { # check <step> <what> <expected> <actual>
+            if [[ "$4" == *"$3"* ]]; then
+              PASS=$((PASS+1)); echo "[$1] PASS: $2"
+              echo "| $1 | PASS | $2 |" >> "$RUNNER_TEMP/wtable.md"
+            else
+              FAIL=$((FAIL+1)); echo "[$1] FAIL: $2 -- expected \"$3\", got: ${4:0:300}"
+              echo "| $1 | FAIL | $2 |" >> "$RUNNER_TEMP/wtable.md"
+            fi
+          }
+          verdict() {
+            echo "[$1] $PASS passed, $FAIL failed"
+            [ "$FAIL" -eq 0 ]
+          }
+
+          dump() { # dump <name> -> a fresh uiautomator dump, under that name
+            adb shell uiautomator dump /sdcard/brama.xml >/dev/null 2>&1
+            adb pull /sdcard/brama.xml "$RUNNER_TEMP/brama-dumps/$1.xml" >/dev/null 2>&1
+            echo "$RUNNER_TEMP/brama-dumps/$1.xml"
+          }
+          screen_texts() { # screen_texts <name> -> every text and content-desc, entities decoded
+            [ -f "$RUNNER_TEMP/brama-dumps/$1.xml" ] || dump "$1" >/dev/null
+            python3 - "$RUNNER_TEMP/brama-dumps/$1.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          for node in root.iter("node"):
+              for value in (node.get("text"), node.get("content-desc")):
+                  if value:
+                      print(value)
+          PY
+          }
+          shot() { adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/$1.png"; }
+          swipe_up() { adb shell input swipe 540 1500 540 500 300; }
+          launch() {
+            adb shell am force-stop $APP
+            adb shell monkey -p $APP -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+            sleep 4
+          }
+
+          nodes_with() { # nodes_with <text> -> python finds every node naming it; prints bounds centre
+            python3 - "$RUNNER_TEMP/brama-dumps/tap.xml" "$1" <<'PY'
+          import sys, re, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          want = sys.argv[2]
+          for node in root.iter("node"):
+              for value in (node.get("text"), node.get("content-desc")):
+                  if value and want in value:
+                      m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+                      if m:
+                          x1, y1, x2, y2 = map(int, m.groups())
+                          print((x1 + x2) // 2, (y1 + y2) // 2)
+                          break
+          PY
+          }
+          await_text() { # await_text <text> [tries [scroll]]
+            local i
+            for i in $(seq 1 "${2:-20}"); do
+              dump await >/dev/null
+              cp "$RUNNER_TEMP/brama-dumps/await.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+              if [ -n "$(nodes_with "$1")" ]; then return 0; fi
+              [ "${3:-}" = scroll ] && swipe_up
+              sleep 2
+            done
+            return 1
+          }
+          tap_text() { # tap_text <text> -> taps the centre of the first node naming it
+            dump tap >/dev/null
+            local xy; xy="$(nodes_with "$1" | head -1)"
+            [ -n "$xy" ] && adb shell input tap $xy && return 0
+            return 1
+          }
+          tap_edit() { # tap_edit <index> -> taps the index-th text field on screen
+            local xy
+            dump edit >/dev/null
+            xy="$(python3 - "$RUNNER_TEMP/brama-dumps/edit.xml" "$1" <<'PY'
+          import sys, re, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          want = int(sys.argv[2])
+          fields = [n for n in root.iter("node") if n.get("class") == "android.widget.EditText"]
+          if want < len(fields):
+              m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", fields[want].get("bounds", ""))
+              if m:
+                  x1, y1, x2, y2 = map(int, m.groups())
+                  print((x1 + x2) // 2, (y1 + y2) // 2)
+          PY
+          )"
+            [ -n "$xy" ] && adb shell input tap $xy && return 0
+            return 1
+          }
+          type() { adb shell input text "$1"; }
+          longpress() { # longpress <text> -> a 700 ms press on the row's centre
+            dump press >/dev/null
+            cp "$RUNNER_TEMP/brama-dumps/press.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+            local xy; xy="$(nodes_with "$1" | head -1)"
+            [ -n "$xy" ] && adb shell input swipe $xy $xy 700 && return 0
+            return 1
+          }
+          open_menu_on_row() {
+            local i
+            for i in 1 2 3; do
+              longpress "$1" && sleep 1 && return 0
+              swipe_up; sleep 1
+            done
+            return 1
+          }
+          # The switch beside a row of settings text: the nearest checkable
+          # node on the row's own height.
+          toggle_beside() { # toggle_beside <row text>
+            dump switch >/dev/null
+            local xy; xy="$(python3 - "$RUNNER_TEMP/brama-dumps/switch.xml" "$1" <<'PY'
+          import sys, re, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          want = sys.argv[2]
+          row = None
+          for node in root.iter("node"):
+              for value in (node.get("text"), node.get("content-desc")):
+                  if value and want in value:
+                      m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+                      if m:
+                          row = tuple(map(int, m.groups()))
+                          break
+          if row is None:
+              sys.exit(0)
+          best = None
+          for node in root.iter("node"):
+              if node.get("checkable") == "true":
+                  m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+                  if not m:
+                      continue
+                  x1, y1, x2, y2 = map(int, m.groups())
+                  cy = (y1 + y2) // 2
+                  if row[1] - 20 <= cy <= row[3] + 20 and x1 > row[0]:
+                      best = ((x1 + x2) // 2, cy)
+          if best:
+              print(*best)
+          PY
+          )"
+            [ -n "$xy" ] && adb shell input tap $xy && return 0
+            return 1
+          }
+          # The lowest clickable node on screen: the now playing bar, when
+          # nothing else names it.
+          tap_bottom() {
+            dump bottom >/dev/null
+            local xy; xy="$(python3 - "$RUNNER_TEMP/brama-dumps/bottom.xml" <<'PY'
+          import sys, re, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          best = None
+          for node in root.iter("node"):
+              if node.get("clickable") == "true":
+                  m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+                  if not m:
+                      continue
+                  x1, y1, x2, y2 = map(int, m.groups())
+                  c = ((x1 + x2) // 2, (y1 + y2) // 2)
+                  if best is None or c[1] > best[1]:
+                      best = c
+          if best:
+              print(*best)
+          PY
+          )"
+            [ -n "$xy" ] && adb shell input tap $xy && return 0
+            return 1
+          }
+
+          sub() { # sub <endpoint-query> -> the bridge's JSON answer, empty on error
+            curl -fsS --max-time 60 "$BRAMA_BASE/rest/$1&$BRAMA_AUTH" 2>/dev/null || true
+          }
+          urlenc() { python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$1"; }
+          playlist_id_by_name() { # playlist_id_by_name <name>
+            sub "getPlaylists.view?" | jq -r --arg n "$1" \
+              '.["subsonic-response"].playlists.playlist[]? | select(.name == $n) | .id' | head -1
+          }
+          playlist_entry_count() { # playlist_entry_count <id>
+            sub "getPlaylist.view?id=$1&" \
+              | jq -r '.["subsonic-response"].playlist.songCount // ([.["subsonic-response"].playlist.entry // []] | length)'
+          }
+          playlist_external_count() { # playlist_external_count <id>
+            sub "getPlaylist.view?id=$1&" \
+              | jq ' [.["subsonic-response"].playlist.entry // [] | .[] | select(.isExternal == true)] | length'
+          }
+
+          # The walks the steps share: open the app's search, and reach the
+          # playlists page under the Library tab.
+          search_for() { # search_for <query>
+            launch
+            tap_text "Search" || tap_edit 0
+            sleep 2
+            tap_edit 0 || tap_text "Search songs, albums, artists"
+            type "$1"
+            adb shell input keyevent 66
+            sleep 8
+          }
+          open_playlists() {
+            tap_text "Library"; sleep 2
+            await_text "Playlists" 10 scroll && tap_text "Playlists" && sleep 2
+          }
+          LIB
+
+      # The patched app signs in to the bridge: address, admin, password, and
+      # the legacy sign-in switch -- the app's normal token sign-in meets the
+      # same Navidrome quirk live-smoke worked around with enc: passwords: an
+      # admin made by ND_DEVAUTOCREATEADMINPASSWORD cannot be token-checked.
+      - name: Sign in to the bridge
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          launch
+          await_text "Sign in to your music server" 30 || { shot sign-in-no-form; echo "::error::The sign-in form never appeared."; exit 1; }
+
+          tap_edit 0
+          type "10.0.2.2:$OCTO_PORT"
+          adb shell input keyevent 66
+          # The address field offers https unless told otherwise; the bridge is plain http.
+          if await_text "Encrypted, https" 3; then tap_text "Encrypted, https"; sleep 1; fi
+          tap_edit 1
+          type "admin"
+          adb shell input keyevent 66
+          tap_edit 2
+          type "$BRAMA_PASS"
+          adb shell input keyevent 111
+
+          await_text "Advanced" 10 scroll && tap_text "Advanced" && sleep 1
+          toggle_beside "Legacy sign-in"; sleep 1
+          swipe_up; sleep 1
+
+          tap_text "Sign in"
+          gone=""
+          for i in $(seq 1 60); do
+            if ! await_text "Sign in to your music server" 1; then gone=1; break; fi
+            sleep 2
+          done
+          if [ -z "$gone" ]; then
+            shot sign-in-failed
+            check S "sign in to the bridge" "signed in" "$(screen_texts sign-in-failed | head -40 | tr '\n' ';')"
+            verdict S
+          fi
+          shot signed-in
+          check S "the patched app signed in to the bridge" "Library" "$(screen_texts signed-in | grep -m1 -E "Home|Library|Search" || echo none)"
+          verdict S
+
+      # W1 (R1, a new playlist): search answers an outside song through the
+      # bridge, its menu offers Add to playlist, a new playlist named
+      # Znalezione takes it, the app renders the row, and the server's
+      # getPlaylist -- after the sync's 1.5 s debounce and a 10 s margin --
+      # holds the outside song.
+      - name: W1 - a found song into a new playlist
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          search_for Mozart
+          check W1 "the search answers the found song" "$F1_TITLE" "$(screen_texts w1-search | grep -F "$F1_TITLE" || echo none)"
+          open_menu_on_row "$F1_TITLE" || { shot w1-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
+          await_text "Add to playlist" 10 || { shot w1-menu; echo "::error::The found song's menu offers no Add to playlist."; exit 1; }
+          check W1 "the found song's menu offers Add to playlist" "Add to playlist" "$(screen_texts w1-menu | grep -m1 "Add to playlist" || echo none)"
+          tap_text "Add to playlist"; sleep 2
+          await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
+          tap_edit 0
+          type "Znalezione"
+          adb shell input keyevent 111
+          tap_text "Create"; sleep 3
+          shot w1-created
+
+          open_playlists
+          await_text "Znalezione" 15 scroll
+          check W1 "the playlists page renders Znalezione" "Znalezione" "$(screen_texts w1-list | grep -m1 Znalezione || echo none)"
+          tap_text "Znalezione"; sleep 3
+          await_text "$F1_TITLE" 15 scroll
+          check W1 "the playlist renders the found song" "$F1_TITLE" "$(screen_texts w1-open | grep -F "$F1_TITLE" || echo none)"
+          shot w1-playlist
+
+          sleep 12   # the sync's 1.5 s debounce, and a margin
+          PID="$(playlist_id_by_name Znalezione)"
+          [ -n "$PID" ] && check W1 "getPlaylist answers the new playlist" "id" "id $PID" \
+            || check W1 "getPlaylist answers the new playlist" "id" "none"
+          check W1 "the server holds the found song after sync" "1" "$(playlist_external_count "${PID:-none}")"
+          verdict W1
+
+      # W2 (R1, an existing playlist): the same menu, an existing library
+      # playlist picked from the page, and the row lands on both ends.
+      - name: W2 - a found song into an existing playlist
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          search_for Mozart
+          open_menu_on_row "$F1_TITLE" || { shot w2-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
+          await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
+          await_text "$W2_NAME" 15 scroll
+          check W2 "the picker lists the existing library playlist" "$W2_NAME" "$(screen_texts w2-picker | grep -m1 "$W2_NAME" || echo none)"
+          tap_text "$W2_NAME"; sleep 3
+          shot w2-added
+          check W2 "the server playlist grew to three songs" "3" "$(playlist_entry_count "$W2_ID")"
+          open_playlists
+          await_text "$W2_NAME" 15 scroll && tap_text "$W2_NAME"; sleep 3
+          await_text "$F1_TITLE" 15 scroll
+          check W2 "the existing playlist renders the found song" "$F1_TITLE" "$(screen_texts w2-open | grep -F "$F1_TITLE" || echo none)"
+          shot w2-playlist
+          verdict W2
+
+      # W3 (R2): two library rows and two found rows, selected together in
+      # one search answer, landed in a new playlist by one action.
+      - name: W3 - a mixed selection into one playlist
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          W3_NAME="Mieszana $BRAMA_RUN"
+          search_for Mozart
+          await_text "Mozart Bridge One" 15 scroll
+          open_menu_on_row "Mozart Bridge One" || { shot w3-no-menu; echo "::error::No menu opened on the first library row."; exit 1; }
+          tap_text "Mozart Bridge Two"; sleep 1
+          tap_text "$F1_TITLE"; sleep 1
+          tap_text "$F2_TITLE"; sleep 1
+          shot w3-selected
+          tap_text "Add to playlist"; sleep 2
+          await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
+          tap_edit 0
+          type "${W3_NAME// /%s}"
+          adb shell input keyevent 111
+          tap_text "Create"; sleep 3
+          shot w3-created
+          PID="$(playlist_id_by_name "$W3_NAME")"
+          [ -n "$PID" ] && check W3 "getPlaylist answers the mixed playlist" "id" "id $PID" \
+            || check W3 "getPlaylist answers the mixed playlist" "id" "none"
+          check W3 "four rows landed by one action" "4" "$(playlist_entry_count "${PID:-none}")"
+          check W3 "two of them are found songs" "2" "$(playlist_external_count "${PID:-none}")"
+          verdict W3
+
+      # W4 (R3): on a found song the menu names the last playlist and takes
+      # the song straight into it, without the picker.
+      - name: W4 - the last playlist on a found song
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          W3_NAME="Mieszana $BRAMA_RUN"
+          search_for Mozart
+          open_menu_on_row "$F1_TITLE" || { shot w4-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
+          await_text "Add to last playlist" 10
+          check W4 "the menu names the last playlist" "Add to last playlist: $W3_NAME" \
+            "$(screen_texts w4-menu | grep -m1 "Add to last playlist" || echo none)"
+          tap_text "Add to last playlist"; sleep 3
+          shot w4-done
+          PID="$(playlist_id_by_name "$W3_NAME")"
+          check W4 "the last playlist grew to five songs, no picker opened" "5" "$(playlist_entry_count "${PID:-none}")"
+          verdict W4
+
+      # W5 (R4): play a library tone, push two found songs in as Play next,
+      # and the queue saved as a playlist keeps every row, the found ones too.
+      - name: W5 - the queue as a playlist, finds kept
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          W5_NAME="Kolejka$BRAMA_RUN"
+          search_for Mozart
+          await_text "Mozart Bridge One" 15 scroll
+          tap_text "Mozart Bridge One"; sleep 4   # plays, so the player and its queue exist
+          open_menu_on_row "$F1_TITLE" && await_text "Play next" 10 && tap_text "Play next"; sleep 2
+          open_menu_on_row "$F2_TITLE" && await_text "Play next" 10 && tap_text "Play next"; sleep 2
+          adb shell input keyevent 111   # the keyboard must not cover the player
+          shot w5-before-player
+
+          tap_bottom; sleep 2            # the now playing bar opens the player
+          shot w5-player
+          await_text "Up next" 8 || tap_bottom
+          tap_text "Up next"; sleep 2
+          shot w5-queue
+          await_text "More" 10 && tap_text "More"; sleep 2
+          await_text "Save as playlist" 10 && tap_text "Save as playlist"; sleep 2
+          tap_edit 0
+          type "$W5_NAME"
+          adb shell input keyevent 111
+          tap_text "Create"; sleep 3
+          shot w5-saved
+          PID="$(playlist_id_by_name "$W5_NAME")"
+          [ -n "$PID" ] && check W5 "getPlaylist answers the queue's playlist" "id" "id $PID" \
+            || check W5 "getPlaylist answers the queue's playlist" "id" "none"
+          check W5 "the queue's three rows all landed" "3" "$(playlist_entry_count "${PID:-none}")"
+          check W5 "the found rows landed with them" "2" "$(playlist_external_count "${PID:-none}")"
+          verdict W5
+
+      # W7 (R6): the About page says why the updater sleeps, and the session's
+      # log holds no line of an update attempt.
+      - name: W7 - the updater asleep
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          tap_text "Settings"; sleep 2
+          await_text "About" 15 scroll && tap_text "About"; sleep 2
+          await_text "patched build" 10 scroll
+          check W7 "About says the patched build does not update itself" \
+            "This is a patched build, so it doesn't update itself." \
+            "$(screen_texts w7-about | grep -m1 "patched build" || echo none)"
+          shot w7-about
+          UPDATES="$(adb logcat -d | grep -E "update refused|update install ended|is out\.|releases\.json|Checking for update" | grep -v "doesn't update" || true)"
+          check W7 "no update attempt anywhere in the session's log" "nothing" "${UPDATES:-nothing}"
+          verdict W7
+
+      # W8 (R7+R8): a rename with ogonki and an emoji, the family playlist
+      # round trip, and the boundary of the whole patch. adb's input text
+      # cannot type an emoji, so the renamed name is sent through the same
+      # updatePlaylist call every Subsonic client sends, and the app's part is
+      # rendering what came back; the family playlist is created and filled
+      # from the app itself, renamed through the client call.
+      - name: W8 - the rename, the family playlist, the boundary
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          RENAMED="Załóżne ✨ źródła ó"
+          ZID="$(playlist_id_by_name Znalezione)"
+
+          curl -fsS "$BRAMA_BASE/rest/updatePlaylist.view?playlistId=$(urlenc "$ZID")&name=$(urlenc "$RENAMED")&$BRAMA_AUTH" \
+            | jq -e '.["subsonic-response"].status == "ok"' >/dev/null
+          check W8 "the server holds the renamed name" "$RENAMED" \
+            "$(sub "getPlaylist.view?id=$(urlenc "$ZID")&" | jq -r '.["subsonic-response"].playlist.name')"
+
+          launch
+          open_playlists
+          await_text "Załóżne" 20 scroll
+          check W8 "the app renders the ogonki and the emoji" "źródła ó" "$(screen_texts w8-render | grep -m1 "źródła ó" || echo none)"
+          shot w8-renamed
+
+          # The family round trip: created from the app with the #family
+          # prefix (a plain # and letters, which adb can type), filled from
+          # the app, renamed through the client call. Names carry the run id,
+          # so no two gates ever meet each other's family playlists.
+          FAM="#family%sBrama%s$BRAMA_RUN"
+          BARE="Brama $BRAMA_RUN"
+          search_for Mozart
+          open_menu_on_row "$F1_TITLE" && await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
+          await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
+          tap_edit 0
+          type "$FAM"
+          adb shell input keyevent 111
+          tap_text "Create"; sleep 4
+          shot w8-family-created
+
+          FID="$(playlist_id_by_name "$BARE")"
+          [ -n "$FID" ] && check W8 "the #family create was captured as a family playlist (of-id)" "of" "${FID:0:2}" \
+            || check W8 "the #family create was captured as a family playlist (of-id)" "of" "none"
+
+          search_for Mozart
+          open_menu_on_row "$F2_TITLE" && await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
+          await_text "$BARE" 15 scroll
+          check W8 "the picker lists the family playlist" "$BARE" "$(screen_texts w8-picker | grep -m1 "$BARE" || echo none)"
+          tap_text "$BARE"; sleep 3
+          check W8 "the family playlist took the added song" "1" "$(playlist_entry_count "${FID:-none}")"
+
+          curl -fsS "$BRAMA_BASE/rest/updatePlaylist.view?playlistId=$(urlenc "$FID")&name=$(urlenc "#family $BARE dwa")&$BRAMA_AUTH" \
+            | jq -e '.["subsonic-response"].status == "ok"' >/dev/null
+          check W8 "the family rename sticks" "$BARE dwa" \
+            "$(sub "getPlaylist.view?id=$(urlenc "$FID")&" | jq -r '.["subsonic-response"].playlist.name')"
+
+          LEAKS="$(git diff --name-only origin/main..HEAD | grep -E "^subsonic/|^app/src/main/java/app/winters/octo/playlists/|^app/src/main/java/app/winters/octo/catalog/" || true)"
+          check W8 "the patch touches no subsonic, playlist or catalog layer" "nothing" "${LEAKS:-nothing}"
+          shot w8-done
+          verdict W8
+
+      - name: The gate's verdict
+        if: always()
+        run: |
+          {
+            echo "### The Brama's walk (W1-W8)"
+            echo
+            echo "| Step | Verdict | What was proven |"
+            echo "|---|---|---|"
+            cat "$RUNNER_TEMP/wtable.md" 2>/dev/null || echo "| - | - | no step wrote a verdict; the run failed before the walk began |"
+            echo
+            echo "**Boundary:** playing a found song is not proven on this runner -- a datacenter"
+            echo "IP always meets YouTube's bot wall (the live-smoke chronicle). The gate proves"
+            echo "the find lands, renders and syncs; playback belongs to the SOAK on the"
+            echo "Admiral's phone, on a residential IP."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the evidence
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/brama-shots" "$RUNNER_TEMP/brama-dumps"
+          adb logcat -d > "$RUNNER_TEMP/brama-dumps/logcat.txt" 2>/dev/null || true
+          for c in "$BRAMA_RUN-octo" "$BRAMA_RUN-navidrome" "$BRAMA_RUN-shim"; do
+            docker logs "$c" > "$RUNNER_TEMP/brama-dumps/$c.log" 2>&1 || true
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: brama-evidence
+          path: |
+            ${{ runner.temp }}/brama-shots/
+            ${{ runner.temp }}/brama-dumps/
+            ${{ runner.temp }}/emulator.log
+          if-no-files-found: warn
