@@ -33,6 +33,9 @@ android {
         // and -Pocto.updates.api=<address> for a pretend GitHub.
         buildConfigField("boolean", "UPDATES_FORCED", (project.findProperty("octo.updates.force") == "true").toString())
         buildConfigField("String", "UPDATES_API", "\"${(project.findProperty("octo.updates.api") as String?).orEmpty()}\"")
+        // The patched build type below turns this on; the updater reads it
+        // and stays asleep in that build.
+        buildConfigField("boolean", "PATCHED", "false")
     }
 
     // The release key, only where the release workflow provides it (from
@@ -40,6 +43,12 @@ android {
     // release must be signed with this same key, or phones refuse the
     // update; without it the release build is left unsigned.
     val releaseKeystore = providers.environmentVariable("OCTO_ANDROID_KEYSTORE").orNull
+    // The patched key, only where the patched workflow provides it (from
+    // this fork's own secrets): the keystore file and its passwords. Every
+    // patched build must be signed with this same key, or phones refuse
+    // the update; without it the patched build falls back to the debug
+    // key, which installs only for trying things out.
+    val patchedKeystore = providers.environmentVariable("OCTO_PATCHED_KEYSTORE").orNull
     signingConfigs {
         if (releaseKeystore != null) {
             create("release") {
@@ -47,6 +56,14 @@ android {
                 storePassword = providers.environmentVariable("OCTO_ANDROID_KEYSTORE_PASSWORD").orNull
                 keyAlias = providers.environmentVariable("OCTO_ANDROID_KEY_ALIAS").orNull
                 keyPassword = providers.environmentVariable("OCTO_ANDROID_KEY_PASSWORD").orNull
+            }
+        }
+        if (patchedKeystore != null) {
+            create("patched") {
+                storeFile = file(patchedKeystore)
+                storePassword = providers.environmentVariable("OCTO_PATCHED_KEYSTORE_PASSWORD").orNull
+                keyAlias = providers.environmentVariable("OCTO_PATCHED_KEY_ALIAS").orNull
+                keyPassword = providers.environmentVariable("OCTO_PATCHED_KEY_PASSWORD").orNull
             }
         }
     }
@@ -60,6 +77,16 @@ android {
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")
+        }
+        // The patched build is this fork's own app, beside the official
+        // one: its own id, the updater asleep, and the patched key when
+        // the workflow provides it (the debug key otherwise).
+        patched {
+            applicationIdSuffix = ".patched"
+            versionNameSuffix = "-patched"
+            isMinifyEnabled = false
+            buildConfigField("boolean", "PATCHED", "true")
+            signingConfig = signingConfigs.findByName("patched") ?: signingConfigs.getByName("debug")
         }
     }
 
