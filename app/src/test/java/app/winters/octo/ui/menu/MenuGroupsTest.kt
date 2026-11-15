@@ -68,7 +68,7 @@ class MenuGroupsTest {
         assertEquals(listOf(DeleteFromPhone, DeleteFromDisk), groups[groups.size - 2])
         // A found song's menu in the player ends the same way.
         assertEquals(
-            listOf(listOf(PlayNext, AddToQueue), listOf(Download), listOf(Info), listOf(Cast, Sound)),
+            listOf(listOf(PlayNext, AddToQueue), listOf(AddToPlaylist, Download), listOf(Info), listOf(Cast, Sound)),
             songMenuGroups(songActions(find = true, radio = false, place = MenuPlace(inPlayer = true))),
         )
     }
@@ -76,7 +76,7 @@ class MenuGroupsTest {
     @Test
     fun aFoundSongHasNoEmptyGroups() {
         assertEquals(
-            listOf(listOf(PlayNext, AddToQueue, StartRadio), listOf(Download), listOf(Info)),
+            listOf(listOf(PlayNext, AddToQueue, StartRadio), listOf(AddToPlaylist, Download), listOf(Info)),
             songMenuGroups(songActions(find = true, radio = true)),
         )
     }
