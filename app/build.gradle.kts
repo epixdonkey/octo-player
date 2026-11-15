@@ -87,6 +87,9 @@ android {
             isMinifyEnabled = false
             buildConfigField("boolean", "PATCHED", "true")
             signingConfig = signingConfigs.findByName("patched") ?: signingConfigs.getByName("debug")
+            // The library modules build no patched variant of their own, so
+            // their release ones stand in here.
+            matchingFallbacks += listOf("release")
         }
     }
 
