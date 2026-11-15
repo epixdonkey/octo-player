@@ -45,7 +45,7 @@ class SongActionsTest {
 
     @Test
     fun findSongsComesAfterTheInfo_ForFoundAndLibrarySongsAlike() {
-        assertEquals(listOf(PlayNext, AddToQueue, Download, Info, FindSongs), songActions(find = true, radio = false, findSongs = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info, FindSongs), songActions(find = true, radio = false, findSongs = true))
         assertEquals(listOf(Info, FindSongs), songMenuGroups(songActions(find = false, radio = false, findSongs = true))[3])
         assertEquals(false, FindSongs in songActions(find = false, radio = true))
     }
@@ -59,7 +59,7 @@ class SongActionsTest {
         )
         // A song found online plays somewhere and through the equalizer too.
         assertEquals(
-            listOf(PlayNext, AddToQueue, Download, Info, FindSongs, Cast, Sound),
+            listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info, FindSongs, Cast, Sound),
             songActions(find = true, radio = false, findSongs = true, place = player),
         )
         // Anywhere else, neither: a row held on a page is about the song only.
@@ -84,7 +84,7 @@ class SongActionsTest {
 
     @Test
     fun aSongFoundOnlineNeverOffersFindInFlac() {
-        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, upgrade = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false, upgrade = true))
     }
 
     @Test
@@ -100,8 +100,8 @@ class SongActionsTest {
         val actions = songActions(find = false, radio = true, lastPlaylist = true)
         assertEquals(listOf(PlayNext, AddToQueue, StartRadio, AddToLastPlaylist, AddToPlaylist, Like, Rate, GoToAlbum, GoToArtist, Info), actions)
         assertEquals(listOf(AddToLastPlaylist, AddToPlaylist, Like, Rate), songMenuGroups(actions)[1])
-        // A song found online cannot go in a playlist yet.
-        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, lastPlaylist = true))
+        // A song found online goes in a playlist too, the last one first.
+        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToLastPlaylist, AddToPlaylist, Info), songActions(find = true, radio = false, lastPlaylist = true))
     }
 
     @Test
@@ -119,7 +119,7 @@ class SongActionsTest {
             songActions(find = false, radio = true, share = true),
         )
         // A find is never shared: it is not in the server's library.
-        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, Info), songActions(find = true, radio = true, share = true))
+        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, AddToPlaylist, Info), songActions(find = true, radio = true, share = true))
     }
 
     @Test
@@ -145,13 +145,13 @@ class SongActionsTest {
 
     @Test
     fun aFindHasNoPhoneFile() {
-        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, phone = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false, phone = true))
     }
 
     @Test
     fun aFindOffersADownloadInsteadOfLibraryChoices() {
-        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, Info), songActions(find = true, radio = true))
-        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false))
+        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, AddToPlaylist, Info), songActions(find = true, radio = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false))
     }
 
     @Test
@@ -168,7 +168,7 @@ class SongActionsTest {
             songActions(find = false, radio = true, offline = true),
         )
         // A find downloads to the server first, never straight to the phone.
-        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, offline = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false, offline = true))
     }
 
     @Test
@@ -207,10 +207,10 @@ class SongActionsTest {
     @Test
     fun aFamilyMemberWhoAsksGetsRequestACopyBesideTheAdd() {
         assertEquals(
-            listOf(PlayNext, AddToQueue, SongAction.Download, SongAction.RequestCopy, Info),
+            listOf(PlayNext, AddToQueue, SongAction.Download, SongAction.RequestCopy, AddToPlaylist, Info),
             songActions(find = true, radio = false, requestCopy = true),
         )
-        assertEquals(listOf(SongAction.Download, SongAction.RequestCopy), songMenuGroups(songActions(find = true, radio = false, requestCopy = true))[1])
+        assertEquals(listOf(AddToPlaylist, SongAction.Download, SongAction.RequestCopy), songMenuGroups(songActions(find = true, radio = false, requestCopy = true))[1])
         // Never on a library song.
         assertEquals(false, SongAction.RequestCopy in songActions(find = false, radio = false, requestCopy = true))
     }
