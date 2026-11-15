@@ -47,13 +47,15 @@ data class UpdateState(
 
 // Whether this build looks for updates, and if not, why not. Only the
 // release build does: a debug build is a different app (app.winters.octo.debug)
-// that the release could never update. -Pocto.updates.force=true builds
-// one that tries anyway.
-fun phoneUpdaterOff(debug: Boolean, forced: Boolean, version: String, hasKeys: Boolean): String? = when {
+// that the release could never update, and so is a patched build
+// (app.winters.octo.patched), this fork's own copy. -Pocto.updates.force=true
+// builds one that tries anyway.
+fun phoneUpdaterOff(debug: Boolean, forced: Boolean, version: String, hasKeys: Boolean, patched: Boolean = false): String? = when {
     PlayerVersion.parse(version) == null -> "This is a test build, so it doesn't update itself."
     !hasKeys -> "This build has no key to check updates with."
     forced -> null
     debug -> "This is a test build, so it doesn't update itself."
+    patched -> "This is a patched build, so it doesn't update itself."
     else -> null
 }
 
@@ -68,7 +70,7 @@ class AppUpdates @Inject constructor(
 ) {
     private val keys = trustedKeys()
     private val running = PlayerVersion.parse(BuildConfig.VERSION_NAME)
-    private val off = phoneUpdaterOff(BuildConfig.DEBUG, BuildConfig.UPDATES_FORCED, BuildConfig.VERSION_NAME, keys.isNotEmpty())
+    private val off = phoneUpdaterOff(BuildConfig.DEBUG, BuildConfig.UPDATES_FORCED, BuildConfig.VERSION_NAME, keys.isNotEmpty(), BuildConfig.PATCHED)
     private val folder = File(context.cacheDir, "updates")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
