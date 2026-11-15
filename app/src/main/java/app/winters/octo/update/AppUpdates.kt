@@ -49,13 +49,15 @@ data class UpdateState(
 // release build does: a debug build is a different app (app.winters.octo.debug)
 // that the release could never update, and so is a patched build
 // (app.winters.octo.patched), this fork's own copy. -Pocto.updates.force=true
-// builds one that tries anyway.
+// builds one that tries anyway. The patched check comes first: the workflow
+// numbers a patched build 0.2.0.N-patched, which is no version at all, so it
+// must say patched before the version is even read.
 fun phoneUpdaterOff(debug: Boolean, forced: Boolean, version: String, hasKeys: Boolean, patched: Boolean = false): String? = when {
+    patched -> "This is a patched build, so it doesn't update itself."
     PlayerVersion.parse(version) == null -> "This is a test build, so it doesn't update itself."
     !hasKeys -> "This build has no key to check updates with."
     forced -> null
     debug -> "This is a test build, so it doesn't update itself."
-    patched -> "This is a patched build, so it doesn't update itself."
     else -> null
 }
 
