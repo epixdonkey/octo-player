@@ -81,7 +81,7 @@ android {
         // The patched build is this fork's own app, beside the official
         // one: its own id, the updater asleep, and the patched key when
         // the workflow provides it (the debug key otherwise).
-        patched {
+        create("patched") {
             applicationIdSuffix = ".patched"
             versionNameSuffix = "-patched"
             isMinifyEnabled = false
