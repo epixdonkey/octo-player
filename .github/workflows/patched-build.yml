@@ -605,7 +605,10 @@ jobs:
           verdict W2
 
       # W3 (R2): two library rows and two found rows, selected together in
-      # one search answer, landed in a new playlist by one action.
+      # one search answer, landed in a new playlist by one action. A plain
+      # tap on a row plays it; the only road into a selection is the row
+      # menu's Select action (SongMenuPopup's single selection.start), so
+      # that starts the picking, and every later tap adds its row to it.
       - name: W3 - a mixed selection into one playlist
         run: |
           set -euo pipefail
@@ -614,10 +617,14 @@ jobs:
           search_for Mozart
           await_text "Mozart Bridge One" 15 scroll
           open_menu_on_row "Mozart Bridge One" || { shot w3-no-menu; echo "::error::No menu opened on the first library row."; exit 1; }
+          await_text "Select" 10 || { shot w3-no-select; echo "::error::The row's menu offers no Select action."; exit 1; }
+          tap_text "Select"; sleep 2
           tap_text "Mozart Bridge Two"; sleep 1
           tap_text "$F1_TITLE"; sleep 1
           tap_text "$F2_TITLE"; sleep 1
           shot w3-selected
+          await_text "Add to playlist" 10 || { shot w3-no-bar; echo "::error::The selection bar did not appear."; exit 1; }
+          check W3 "the selection bar offers Add to playlist" "Add to playlist" "$(screen_texts w3-bar | grep -m1 "Add to playlist" || echo none)"
           tap_text "Add to playlist"; sleep 2
           await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
           tap_edit 0
@@ -706,7 +713,10 @@ jobs:
       # cannot type an emoji, so the renamed name is sent through the same
       # updatePlaylist call every Subsonic client sends, and the app's part is
       # rendering what came back; the family playlist is created and filled
-      # from the app itself, renamed through the client call.
+      # from the app itself, renamed through the client call. The family
+      # assertions read the row's shape -- the name as the server answers it,
+      # the rest after the #family prefix, under owner Family -- not a name
+      # with the prefix baked in.
       - name: W8 - the rename, the family playlist, the boundary
         run: |
           set -euo pipefail
@@ -743,6 +753,11 @@ jobs:
           FID="$(playlist_id_by_name "$BARE")"
           [ -n "$FID" ] && check W8 "the #family create was captured as a family playlist (of-id)" "of" "${FID:0:2}" \
             || check W8 "the #family create was captured as a family playlist (of-id)" "of" "none"
+          # The family row's shape, not a name with the prefix in it: the
+          # server answers the rest after #family, under the family's owner.
+          FAMROW="$(sub "getPlaylists.view?" | jq -c --arg n "$BARE" '.["subsonic-response"].playlists.playlist[]? | select(.name == $n)' | head -1)"
+          check W8 "the family playlist's name is the rest after the #family prefix" "$BARE" "$(jq -r '.name // empty' <<<"$FAMROW")"
+          check W8 "the family playlist belongs to the family (owner Family)" "Family" "$(jq -r '.owner // empty' <<<"$FAMROW")"
 
           search_for Mozart
           open_menu_on_row "$F2_TITLE" && await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
