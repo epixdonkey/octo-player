@@ -9,11 +9,15 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import app.winters.octo.catalog.CatalogDao
 import app.winters.octo.catalog.LikedTrackEntity
+import app.winters.octo.catalog.OnlineDao
+import app.winters.octo.catalog.OnlineSongEntity
 import app.winters.octo.catalog.PlayEventEntity
 import app.winters.octo.catalog.QueueItemEntity
 import app.winters.octo.catalog.QueueStateEntity
 import app.winters.octo.catalog.TrackEntity
 import app.winters.octo.catalog.UserDao
+import app.winters.octo.catalog.isFind
+import app.winters.octo.discovery.asTrack
 import app.winters.octo.listening.ListenBrainzSync
 import app.winters.octo.listening.ListeningSync
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -40,6 +44,25 @@ suspend fun CatalogDao.tracksByIds(ids: List<String>): List<TrackEntity> {
     val found = ids.distinct().chunked(900).flatMap { tracksByIdsUnordered(it) }.associateBy { it.id }
     return ids.mapNotNull { found[it] }
 }
+
+// The songs asked for by id, whether they sit in the library or were found
+// online: a found song is shaped like a library one, so a playlist can hold
+// it. The order asked for is kept, an id asked for twice is answered once,
+// and an id neither side has is dropped.
+fun withFinds(ids: List<String>, library: List<TrackEntity>, finds: List<OnlineSongEntity>): List<TrackEntity> {
+    val tracks = library.associateBy { it.id }
+    val online = finds.associateBy { it.id }
+    return ids.distinct().mapNotNull { id -> if (isFind(id)) online[id]?.asTrack() else tracks[id] }
+}
+
+// The same lookup across the database: library songs from the catalog, found
+// ones from the table of online songs, in batches SQLite's IN can take.
+suspend fun tracksWithFinds(catalog: CatalogDao, online: OnlineDao, ids: List<String>): List<TrackEntity> =
+    withFinds(
+        ids,
+        catalog.tracksByIds(ids.filterNot(::isFind)),
+        ids.filter(::isFind).distinct().chunked(900).flatMap { online.byIds(it) },
+    )
 
 @Singleton
 class LikeStore @Inject constructor(
