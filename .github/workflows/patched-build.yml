@@ -1,0 +1,79 @@
+# Builds the phone app's patched APK, this fork's own copy of Octo: an app
+# beside the official one (app.winters.octo.patched), signed with the patched
+# key, its updater asleep. Run by hand from the Actions tab, or on every push
+# to the fork's branches, the APK is kept as the run's artifact.
+#
+# The patched key comes from four secrets: OCTO_PATCHED_KEYSTORE_BASE64 (the
+# keystore file, base64), OCTO_PATCHED_KEYSTORE_PASSWORD, OCTO_PATCHED_KEY_ALIAS
+# and OCTO_PATCHED_KEY_PASSWORD. Every patched build must use the same key, or
+# phones refuse the update. The key itself never enters this repository.
+name: patched-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/octo-player-find-playlists, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The commit count is the version code, so every build counts up.
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build number
+        run: echo "OCTO_BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+
+      - name: Tests
+        run: ./gradlew :shared:core:allTests :app:testDebugUnitTest --no-daemon
+
+      - name: Patched key
+        env:
+          KEYSTORE: ${{ secrets.OCTO_PATCHED_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then echo "::error::OCTO_PATCHED_KEYSTORE_BASE64 is not set in this repository's secrets."; exit 1; fi
+          umask 077
+          printf '%s' "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/octo-patched.jks"
+          echo "OCTO_PATCHED_KEYSTORE=$RUNNER_TEMP/octo-patched.jks" >> "$GITHUB_ENV"
+
+      - name: Signed APK
+        env:
+          OCTO_PATCHED_KEYSTORE_PASSWORD: ${{ secrets.OCTO_PATCHED_KEYSTORE_PASSWORD }}
+          OCTO_PATCHED_KEY_ALIAS: ${{ secrets.OCTO_PATCHED_KEY_ALIAS }}
+          OCTO_PATCHED_KEY_PASSWORD: ${{ secrets.OCTO_PATCHED_KEY_PASSWORD }}
+        run: ./gradlew :app:assemblePatched -PoctoBuild=${OCTO_BUILD} --no-daemon
+
+      - name: The APK is signed
+        run: |
+          apk=app/build/outputs/apk/patched/app-patched.apk
+          if [ ! -f "$apk" ]; then echo "::error::No signed APK: the patched key did not reach the build."; exit 1; fi
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          "$tools/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+          grep "certificate SHA-256 digest" "$RUNNER_TEMP/certs.txt"
+          {
+            echo "### Octo for Android (patched)"
+            echo
+            echo '```'
+            grep "certificate SHA-256 digest" "$RUNNER_TEMP/certs.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/octo-patched.jks"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: octo-android-patched
+          path: app/build/outputs/apk/patched/app-patched.apk
+          if-no-files-found: error
