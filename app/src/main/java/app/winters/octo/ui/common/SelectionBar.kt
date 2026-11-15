@@ -181,8 +181,8 @@ private fun SelectionBar(target: SelectionTarget, phoneFiles: PhoneFileActions, 
                 BarButton(OctoIcons.Play, "Play", each) { act { vm.play(ids) } }
                 BarButton(OctoIcons.PlayNext, "Play next", each) { act { vm.playNext(ids) } }
                 BarButton(OctoIcons.AddToQueue, "Add to queue", each) { act { vm.addToQueue(ids) } }
-                BarButton(OctoIcons.AddToPlaylist, "Add to playlist", each, enabled = library.isNotEmpty()) {
-                    act { sheets.show(PlaylistSheet.Pick(library)) }
+                BarButton(OctoIcons.AddToPlaylist, "Add to playlist", each, enabled = ids.isNotEmpty()) {
+                    act { sheets.show(PlaylistSheet.Pick(ids)) }
                 }
                 BarButton(OctoIcons.Download, "Download", each, enabled = canDownload) { act { vm.download(library) } }
                 BarButton(
