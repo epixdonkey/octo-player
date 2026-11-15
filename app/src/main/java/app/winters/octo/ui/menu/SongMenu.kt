@@ -152,8 +152,8 @@ fun menuPlace(context: SongMenuContext, albumId: String, artistId: String): Menu
 )
 
 // What a song's menu offers. A song found online has no album or artist in
-// the library and cannot be liked, rated or put in a playlist yet, so it
-// offers a download instead. Radio needs a server signed in; sharing needs
+// the library and cannot be liked or rated, but it can go in a playlist, and
+// it offers a download too. Radio needs a server signed in; sharing needs
 // a copy of the song on a server that shares. A library song only on a
 // server (`offline`) can be downloaded to the phone. One with a file on the
 // phone (`phone`) can send that file, ring with it, or delete it.
@@ -188,6 +188,8 @@ fun songActions(
     if (find) {
         add(SongAction.Download)
         if (requestCopy) add(SongAction.RequestCopy)
+        if (lastPlaylist) add(SongAction.AddToLastPlaylist)
+        add(SongAction.AddToPlaylist)
         if (place.inPlaylist) add(SongAction.RemoveFromPlaylist)
         if (place.selectable) add(SongAction.Select)
     } else {
@@ -243,7 +245,7 @@ fun downloadLabel(state: DownloadState): String = when (state) {
     DownloadState.Done -> "In your library"
 }
 
-// The row's words for a library song downloaded to the phone, or not yet.
+// The row's words for a library song downloaded to the phone, or still to be.
 // `byHand` is a download asked for from a menu, which can be removed here;
 // one a rule keeps (Liked songs, a playlist) goes with its rule.
 fun keepOfflineLabel(state: DownloadStatus?, byHand: Boolean): String = when (state) {
@@ -319,7 +321,7 @@ class SongMenuViewModel @Inject constructor(
     val canUpgrade: StateFlow<Boolean> = upgrades.canUpgrade
 
     // The song's copy on the server, when a FLAC could replace it; empty
-    // for a find, which has no copy of its own yet.
+    // for a find, which has no copy of its own.
     suspend fun upgradable(trackId: String): List<UpgradeAsk> = if (isFind(trackId)) emptyList() else upgrades.upgradable(listOf(trackId))
 
     fun findFlac(asks: List<UpgradeAsk>) = upgrades.request(asks)
