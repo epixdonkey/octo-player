@@ -308,59 +308,13 @@ jobs:
           adb shell wm dismiss-keyguard 2>/dev/null || true
           adb devices
 
-      # W6 (R5): the official 1.11.0 from the developer's own release (the
-      # same APK the developer's F-Droid repository indexes), installed first;
-      # then the patched APK from this run's artifact, beside it, without a
-      # conflict; the official app still starts on its own sign-in page, its
-      # data untouched.
-      - name: W6 - the patched APK beside the official one
-        run: |
-          set -euo pipefail
-          # The developer's release answered a transient HTTP error once (run
-          # 43881317753; the asset is there and rebuilt releases are their
-          # habit), so the download retries hard and then proves the file
-          # against the release's own SHA256SUMS -- a cut-off or re-meaned
-          # asset must fail loudly, not install.
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
-            -o "$RUNNER_TEMP/Octo-1.11.0-android.apk" "$OFFICIAL_APK" \
-            || { echo "::error::The official APK did not come down in five tries: $OFFICIAL_APK"; exit 1; }
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
-            -o "$RUNNER_TEMP/SHA256SUMS" "${OFFICIAL_APK%/*}/SHA256SUMS" \
-            || { echo "::error::The release's SHA256SUMS did not come down."; exit 1; }
-          ( cd "$RUNNER_TEMP" && grep -F "Octo-1.11.0-android.apk" SHA256SUMS | sha256sum -c - ) \
-            || { echo "::error::The official APK's hash does not match the release's SHA256SUMS."; exit 1; }
-          adb install "$RUNNER_TEMP/Octo-1.11.0-android.apk" >/dev/null
-          adb install app-patched.apk >/dev/null
-          mkdir -p "$RUNNER_TEMP/brama-shots" "$RUNNER_TEMP/brama-dumps"
-          pkgs="$(adb shell pm list packages)"
-          echo "$pkgs" | grep -Fx "package:app.winters.octo" \
-            && echo "[W6] PASS: the official app.winters.octo is installed" \
-            || { echo "[W6] FAIL: the official app.winters.octo is missing"; exit 1; }
-          echo "$pkgs" | grep -Fx "package:app.winters.octo.patched" \
-            && echo "[W6] PASS: app.winters.octo.patched is installed beside it" \
-            || { echo "[W6] FAIL: app.winters.octo.patched is missing"; exit 1; }
-          adb shell am start -n app.winters.octo/app.winters.octo.MainActivity >/dev/null
-          sleep 5
-          adb shell uiautomator dump /sdcard/brama.xml >/dev/null 2>&1
-          adb pull /sdcard/brama.xml "$RUNNER_TEMP/brama-dumps/w6-official.xml" >/dev/null 2>&1
-          grep -q "Sign in" "$RUNNER_TEMP/brama-dumps/w6-official.xml" \
-            && echo "[W6] PASS: the official app starts, its own data untouched" \
-            || { echo "[W6] FAIL: the official app did not start."; exit 1; }
-          adb shell am force-stop app.winters.octo
-          adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/w6-official.png"
-          touch "$RUNNER_TEMP/wtable.md"
-          {
-            echo "| W6 | PASS | official 1.11.0 and the patched APK installed side by side, no conflict |"
-            echo "| W6 | PASS | pm list packages shows app.winters.octo and app.winters.octo.patched |"
-            echo "| W6 | PASS | the official app still starts on its own sign-in page |"
-          } >> "$RUNNER_TEMP/wtable.md"
-
       # What the W steps share: a dump-and-tap helper over uiautomator, a
       # Subsonic probe against the bridge, a verdict per line. State, never
       # pixels: every tap lands on the centre of a node the dump names.
       - name: The gate's helpers
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/brama-shots" "$RUNNER_TEMP/brama-dumps"
           cat > "$RUNNER_TEMP/brama-lib.sh" <<'LIB'
           set -u
           PASS=0; FAIL=0
@@ -380,9 +334,18 @@ jobs:
             [ "$FAIL" -eq 0 ]
           }
 
-          dump() { # dump <name> -> a fresh uiautomator dump, under that name
-            adb shell uiautomator dump /sdcard/brama.xml >/dev/null 2>&1
-            adb pull /sdcard/brama.xml "$RUNNER_TEMP/brama-dumps/$1.xml" >/dev/null 2>&1
+          dump() { # dump <name> -> a fresh uiautomator dump, under that name; never silent
+            local i ok=""
+            for i in 1 2 3; do
+              adb shell uiautomator dump /sdcard/brama.xml >/dev/null 2>&1 || { sleep 2; continue; }
+              adb pull /sdcard/brama.xml "$RUNNER_TEMP/brama-dumps/$1.xml" >/dev/null 2>&1 || { sleep 2; continue; }
+              ok=1; break
+            done
+            if [ -z "$ok" ]; then
+              adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/$1-dump-failed.png" 2>/dev/null || true
+              echo "::error::The screen dump $1 never came down in three tries."
+              exit 1
+            fi
             echo "$RUNNER_TEMP/brama-dumps/$1.xml"
           }
           screen_texts() { # screen_texts <name> -> every text and content-desc, entities decoded
@@ -396,11 +359,14 @@ jobs:
                       print(value)
           PY
           }
-          shot() { adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/$1.png"; }
+          # A shot is evidence, never a gate: if it cannot be taken, the
+          # assertion it stood beside still speaks.
+          shot() { adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/$1.png" 2>/dev/null || true; }
           swipe_up() { adb shell input swipe 540 1500 540 500 300; }
           launch() {
             adb shell am force-stop $APP
-            adb shell monkey -p $APP -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+            adb shell monkey -p $APP -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 \
+              || { echo "::error::The patched app would not start."; exit 1; }
             sleep 4
           }
 
@@ -596,6 +562,56 @@ jobs:
             await_text "Playlists" 10 scroll && tap_text "Playlists" && sleep 2
           }
           LIB
+
+      # W6 (R5): the official 1.11.0 from the developer's own release (the
+      # same APK the developer's F-Droid repository indexes), installed first;
+      # then the patched APK from this run's artifact, beside it, without a
+      # conflict; the official app still starts on its own sign-in page, its
+      # data untouched.
+      - name: W6 - the patched APK beside the official one
+        run: |
+          set -euo pipefail
+          source "$RUNNER_TEMP/brama-lib.sh"
+          # The developer's release answered a transient HTTP error once (run
+          # 43881317753; the asset is there and rebuilt releases are their
+          # habit), so the download retries hard and then proves the file
+          # against the release's own SHA256SUMS -- a cut-off or re-meaned
+          # asset must fail loudly, not install. The helpers this step now
+          # shares with the walk give the screen dump its own retries and its
+          # own loud failure (run 43885621408 died on a bare dump with no
+          # word, both installs already proven).
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/Octo-1.11.0-android.apk" "$OFFICIAL_APK" \
+            || { echo "::error::The official APK did not come down in five tries: $OFFICIAL_APK"; exit 1; }
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/SHA256SUMS" "${OFFICIAL_APK%/*}/SHA256SUMS" \
+            || { echo "::error::The release's SHA256SUMS did not come down."; exit 1; }
+          ( cd "$RUNNER_TEMP" && grep -F "Octo-1.11.0-android.apk" SHA256SUMS | sha256sum -c - ) \
+            || { echo "::error::The official APK's hash does not match the release's SHA256SUMS."; exit 1; }
+          adb install "$RUNNER_TEMP/Octo-1.11.0-android.apk" >/dev/null
+          adb install app-patched.apk >/dev/null
+          pkgs="$(adb shell pm list packages)"
+          echo "$pkgs" | grep -Fx "package:app.winters.octo" \
+            && echo "[W6] PASS: the official app.winters.octo is installed" \
+            || { echo "[W6] FAIL: the official app.winters.octo is missing"; exit 1; }
+          echo "$pkgs" | grep -Fx "package:app.winters.octo.patched" \
+            && echo "[W6] PASS: app.winters.octo.patched is installed beside it" \
+            || { echo "[W6] FAIL: app.winters.octo.patched is missing"; exit 1; }
+          adb shell am start -n app.winters.octo/app.winters.octo.MainActivity >/dev/null \
+            || { echo "::error::The official app would not start."; exit 1; }
+          sleep 5
+          official_xml="$(dump w6-official)"
+          grep -q "Sign in" "$official_xml" \
+            && echo "[W6] PASS: the official app starts, its own data untouched" \
+            || { echo "[W6] FAIL: the official app did not reach its sign-in page."; shot w6-official-failed; exit 1; }
+          adb shell am force-stop app.winters.octo
+          shot w6-official
+          touch "$RUNNER_TEMP/wtable.md"
+          {
+            echo "| W6 | PASS | official 1.11.0 and the patched APK installed side by side, no conflict |"
+            echo "| W6 | PASS | pm list packages shows app.winters.octo and app.winters.octo.patched |"
+            echo "| W6 | PASS | the official app still starts on its own sign-in page |"
+          } >> "$RUNNER_TEMP/wtable.md"
 
       # The patched app signs in to the bridge: address, admin, password, and
       # the legacy sign-in switch -- the app's normal token sign-in meets the
