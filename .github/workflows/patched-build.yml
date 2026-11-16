@@ -594,6 +594,14 @@ jobs:
           set -euo pipefail
           source "$RUNNER_TEMP/brama-lib.sh"
           launch
+          # The app opens on Home, not on the sign-in form: a permission
+          # dialog may sit on top of it (run 43873688215's evidence shows
+          # Allow / Not now over Home), and the form itself waits behind the
+          # "Sign in to a server" button. Decline the dialog, tap the
+          # button, and only then can the form's own heading appear.
+          if await_text "Allow" 3; then tap_text "Not now"; sleep 1; fi
+          await_text "Sign in to a server" 30 || { shot sign-in-no-entry; echo "::error::Home's Sign in to a server entry never appeared."; exit 1; }
+          tap_text "Sign in to a server"
           await_text "Sign in to your music server" 30 || { shot sign-in-no-form; echo "::error::The sign-in form never appeared."; exit 1; }
 
           tap_edit 0
