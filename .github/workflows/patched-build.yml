@@ -260,6 +260,13 @@ jobs:
         run: |
           set -euo pipefail
           [ -e /dev/kvm ] || { echo "::error::This runner exposes no /dev/kvm; the gate cannot run an emulator here."; exit 1; }
+          # The device existing is not the same as this user being allowed
+          # into it: run 43870530955's emulator refused to start with "This
+          # user doesn't have permissions to use KVM" while the runner user
+          # sat outside the kvm group. Opening the device to the session is
+          # the standard CI answer; adding the user to the group would not
+          # reach the already-running process.
+          sudo chmod 666 /dev/kvm
           # No `yes |` here: sdkmanager does not read standard input, and a
           # producer piping into it dies of the broken pipe under pipefail
           # even when the install itself succeeded. The runner image ships
