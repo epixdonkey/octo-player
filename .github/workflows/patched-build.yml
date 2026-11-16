@@ -599,28 +599,44 @@ jobs:
           # Allow / Not now over Home), and the form itself waits behind the
           # "Sign in to a server" button. Decline the dialog, tap the
           # button, and only then can the form's own heading appear.
-          if await_text "Allow" 3; then tap_text "Not now"; sleep 1; fi
+          # Every tap and await below fails loudly, with a shot: run
+          # 43877011581 left the step on a silent exit, with the form
+          # filled and the server never asked anything.
+          if await_text "Allow" 3; then
+            tap_text "Not now" || { shot sign-in-dialog; echo "::error::The permission dialog's Not now could not be tapped."; exit 1; }
+            sleep 1
+          fi
           await_text "Sign in to a server" 30 || { shot sign-in-no-entry; echo "::error::Home's Sign in to a server entry never appeared."; exit 1; }
-          tap_text "Sign in to a server"
+          tap_text "Sign in to a server" || { shot sign-in-entry; echo "::error::The Sign in to a server entry could not be tapped."; exit 1; }
           await_text "Sign in to your music server" 30 || { shot sign-in-no-form; echo "::error::The sign-in form never appeared."; exit 1; }
 
-          tap_edit 0
+          tap_edit 0 || { shot sign-in-address; echo "::error::The address field never appeared."; exit 1; }
           type "10.0.2.2:$OCTO_PORT"
           adb shell input keyevent 66
           # The address field offers https unless told otherwise; the bridge is plain http.
-          if await_text "Encrypted, https" 3; then tap_text "Encrypted, https"; sleep 1; fi
-          tap_edit 1
+          if await_text "Encrypted, https" 3; then
+            tap_text "Encrypted, https" || { shot sign-in-scheme; echo "::error::The scheme toggle could not be tapped."; exit 1; }
+            sleep 1
+          fi
+          tap_edit 1 || { shot sign-in-user; echo "::error::The username field never appeared."; exit 1; }
           type "admin"
           adb shell input keyevent 66
-          tap_edit 2
+          tap_edit 2 || { shot sign-in-pass; echo "::error::The password field never appeared."; exit 1; }
           type "$BRAMA_PASS"
-          adb shell input keyevent 111
+          adb shell input keyevent 111   # the keyboard down: it hides the rows below
 
-          await_text "Advanced" 10 scroll && tap_text "Advanced" && sleep 1
-          toggle_beside "Legacy sign-in"; sleep 1
+          await_text "Advanced" 15 scroll || { shot sign-in-no-advanced; echo "::error::The form's Advanced fold never appeared."; exit 1; }
+          tap_text "Advanced" || { shot sign-in-advanced; echo "::error::The Advanced fold could not be tapped."; exit 1; }
+          sleep 1
+          # Run 43877011581: with the keyboard up, this row sat below the
+          # fold and off screen; the form scrolls, and the switch must be
+          # found before it is flipped.
+          await_text "Legacy sign-in" 15 scroll || { shot sign-in-no-legacy; echo "::error::The Legacy sign-in row never appeared."; exit 1; }
+          toggle_beside "Legacy sign-in" || { shot sign-in-legacy; echo "::error::The Legacy sign-in switch could not be tapped."; exit 1; }
+          sleep 1
           swipe_up; sleep 1
 
-          tap_text "Sign in"
+          tap_text "Sign in" || { shot sign-in-submit; echo "::error::The Sign in button could not be tapped."; exit 1; }
           gone=""
           for i in $(seq 1 60); do
             if ! await_text "Sign in to your music server" 1; then gone=1; break; fi
