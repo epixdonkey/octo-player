@@ -371,11 +371,29 @@ jobs:
           # assertion it stood beside still speaks.
           shot() { adb exec-out screencap -p > "$RUNNER_TEMP/brama-shots/$1.png" 2>/dev/null || true; }
           swipe_up() { adb shell input swipe 540 1500 540 500 300; }
+          # The user never kills the app to look at it, and neither may the
+          # gate: run 43898136604's search step force-stopped the freshly
+          # signed-in app, and after the kill the session never came back in
+          # the window -- no search3 left the phone, the library copy stayed
+          # empty, and the search said "No results". Bringing the activity
+          # forward leaves the session and the copy alone.
           launch() {
-            adb shell am force-stop $APP
-            adb shell monkey -p $APP -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 \
-              || { echo "::error::The patched app would not start."; exit 1; }
-            sleep 4
+            adb shell am start -n $APP/app.winters.octo.MainActivity >/dev/null \
+              || { echo "::error::The patched app would not come forward."; exit 1; }
+            sleep 3
+          }
+          # BACK until the bottom bar answers: out of whatever the last step
+          # left open (the player W5 leaves behind), without killing anything.
+          back_to_main() {
+            local i
+            for i in 1 2 3 4 5; do
+              dump back >/dev/null
+              cp "$RUNNER_TEMP/brama-dumps/back.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+              [ -n "$(nodes_with "Settings")" ] && return 0
+              adb shell input keyevent 4
+              sleep 1
+            done
+            return 1
           }
 
           nodes_with() { # nodes_with <text> -> the first node naming it, as a bounds centre
@@ -839,15 +857,15 @@ jobs:
           verdict W5
 
       # W7 (R6): the About page says why the updater sleeps, and the session's
-      # log holds no line of an update attempt. The step starts from a clean
-      # shell: the player W5 leaves open hides the bottom bar, the only road
-      # to Settings.
+      # log holds no line of an update attempt. The step backs out of what
+      # W5 leaves open -- the player hides the bottom bar, the only road to
+      # Settings -- without killing the app (a kill threw the session away
+      # once already).
       - name: W7 - the updater asleep
         run: |
           set -euo pipefail
           source "$RUNNER_TEMP/brama-lib.sh"
-          launch
-          await_text "Home" 15 || true
+          back_to_main || { shot w7-no-shell; echo "::error::Could not get back to the main shell for Settings."; exit 1; }
           tap_text "Settings"; sleep 2
           await_text "About" 15 scroll && tap_text "About"; sleep 2
           await_text "patched build" 10 scroll
