@@ -316,7 +316,19 @@ jobs:
       - name: W6 - the patched APK beside the official one
         run: |
           set -euo pipefail
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/Octo-1.11.0-android.apk" "$OFFICIAL_APK"
+          # The developer's release answered a transient HTTP error once (run
+          # 43881317753; the asset is there and rebuilt releases are their
+          # habit), so the download retries hard and then proves the file
+          # against the release's own SHA256SUMS -- a cut-off or re-meaned
+          # asset must fail loudly, not install.
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/Octo-1.11.0-android.apk" "$OFFICIAL_APK" \
+            || { echo "::error::The official APK did not come down in five tries: $OFFICIAL_APK"; exit 1; }
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -o "$RUNNER_TEMP/SHA256SUMS" "${OFFICIAL_APK%/*}/SHA256SUMS" \
+            || { echo "::error::The release's SHA256SUMS did not come down."; exit 1; }
+          ( cd "$RUNNER_TEMP" && grep -F "Octo-1.11.0-android.apk" SHA256SUMS | sha256sum -c - ) \
+            || { echo "::error::The official APK's hash does not match the release's SHA256SUMS."; exit 1; }
           adb install "$RUNNER_TEMP/Octo-1.11.0-android.apk" >/dev/null
           adb install app-patched.apk >/dev/null
           mkdir -p "$RUNNER_TEMP/brama-shots" "$RUNNER_TEMP/brama-dumps"
