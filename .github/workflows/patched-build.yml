@@ -131,6 +131,9 @@ jobs:
       - name: The bridge stack
         run: |
           set -euo pipefail
+          # The runner images no longer carry ffmpeg, and the library tones
+          # need it; the apt build is enough for lavfi sines and tagging.
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           PW="brama-$BRAMA_RUN-pass"
           PW_HEX="$(printf '%s' "$PW" | od -An -tx1 | tr -d ' \n')"
           MUSIC="$(mktemp -d)/music"
