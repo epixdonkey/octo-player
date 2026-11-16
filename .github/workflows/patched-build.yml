@@ -242,12 +242,24 @@ jobs:
         run: |
           set -euo pipefail
           [ -e /dev/kvm ] || { echo "::error::This runner exposes no /dev/kvm; the gate cannot run an emulator here."; exit 1; }
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "system-images;android-36;google_apis;x86_64" >/dev/null
+          # No `yes |` here: sdkmanager does not read standard input, and a
+          # producer piping into it dies of the broken pipe under pipefail
+          # even when the install itself succeeded. The runner image ships
+          # the licences already accepted.
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "system-images;android-36;google_apis;x86_64" >/dev/null
           echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n "$BRAMA_RUN" \
             -k "system-images;android-36;google_apis;x86_64" --device pixel
           nohup "$ANDROID_HOME/emulator/emulator" -avd "$BRAMA_RUN" \
             -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -accel on \
             -memory 3072 -no-snapshot > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          # A deadline on the device showing up at all; wait-for-device by
+          # itself would sit quiet to the job's timeout if the process died.
+          seen=""
+          for i in $(seq 1 60); do
+            if adb devices | grep -q "emulator-"; then seen=1; break; fi
+            sleep 2
+          done
+          [ -n "$seen" ] || { echo "::error::The emulator never showed up in adb."; tail -40 "$RUNNER_TEMP/emulator.log"; exit 1; }
           adb wait-for-device
           boot=""
           for i in $(seq 1 300); do
@@ -347,7 +359,7 @@ jobs:
             sleep 4
           }
 
-          nodes_with() { # nodes_with <text> -> python finds every node naming it; prints bounds centre
+          nodes_with() { # nodes_with <text> -> the first node naming it, as a bounds centre
             python3 - "$RUNNER_TEMP/brama-dumps/tap.xml" "$1" <<'PY'
           import sys, re, xml.etree.ElementTree as ET
           root = ET.parse(sys.argv[1]).getroot()
@@ -359,7 +371,7 @@ jobs:
                       if m:
                           x1, y1, x2, y2 = map(int, m.groups())
                           print((x1 + x2) // 2, (y1 + y2) // 2)
-                          break
+                          sys.exit(0)
           PY
           }
           await_text() { # await_text <text> [tries [scroll]]
@@ -375,7 +387,7 @@ jobs:
           }
           tap_text() { # tap_text <text> -> taps the centre of the first node naming it
             dump tap >/dev/null
-            local xy; xy="$(nodes_with "$1" | head -1)"
+            local xy; xy="$(nodes_with "$1")"
             [ -n "$xy" ] && adb shell input tap $xy && return 0
             return 1
           }
@@ -401,7 +413,7 @@ jobs:
           longpress() { # longpress <text> -> a 700 ms press on the row's centre
             dump press >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/press.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
-            local xy; xy="$(nodes_with "$1" | head -1)"
+            local xy; xy="$(nodes_with "$1")"
             [ -n "$xy" ] && adb shell input swipe $xy $xy 700 && return 0
             return 1
           }
@@ -477,9 +489,9 @@ jobs:
             curl -fsS --max-time 60 "$BRAMA_BASE/rest/$1&$BRAMA_AUTH" 2>/dev/null || true
           }
           urlenc() { python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$1"; }
-          playlist_id_by_name() { # playlist_id_by_name <name>
+          playlist_id_by_name() { # playlist_id_by_name <name> -> the first matching id, or nothing
             sub "getPlaylists.view?" | jq -r --arg n "$1" \
-              '.["subsonic-response"].playlists.playlist[]? | select(.name == $n) | .id' | head -1
+              '[.["subsonic-response"].playlists.playlist[]? | select(.name == $n) | .id][0] // empty'
           }
           playlist_entry_count() { # playlist_entry_count <id> -> songCount, or api-error
             local body v
@@ -796,7 +808,7 @@ jobs:
             || check W8 "the #family create was captured as a family playlist (of-id)" "of" "none"
           # The family row's shape, not a name with the prefix in it: the
           # server answers the rest after #family, under the family's owner.
-          FAMROW="$(sub "getPlaylists.view?" | jq -c --arg n "$BARE" '.["subsonic-response"].playlists.playlist[]? | select(.name == $n)' | head -1)"
+          FAMROW="$(sub "getPlaylists.view?" | jq -c --arg n "$BARE" '[.["subsonic-response"].playlists.playlist[]? | select(.name == $n)][0] // empty')"
           check W8 "the family playlist's name is the rest after the #family prefix" "$BARE" "$(jq -r '.name // empty' <<<"$FAMROW")"
           check W8 "the family playlist belongs to the family (owner Family)" "Family" "$(jq -r '.owner // empty' <<<"$FAMROW")"
 
