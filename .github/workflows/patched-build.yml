@@ -122,7 +122,10 @@ jobs:
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "ANDROID_AVD_HOME=$HOME/.android/avd" >> "$GITHUB_ENV"
           mkdir -p "$HOME/.android/avd"
-          adb version
+          # The PATH written above only reaches the NEXT steps, so this proof
+          # names adb by its full path: the bare name would die with 127 here
+          # (run 43858067710) and skip the whole walk.
+          "$ANDROID_HOME/platform-tools/adb" version
 
       - name: The fork, for the boundary check
         uses: actions/checkout@v7
@@ -872,9 +875,13 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/brama-shots" "$RUNNER_TEMP/brama-dumps"
-          adb logcat -d > "$RUNNER_TEMP/brama-dumps/logcat.txt" 2>/dev/null || true
+          # Evidence must never hang the job: this step runs even when the
+          # emulator or the bridge is long dead, and adb against a dead
+          # device sat here for most of an hour (run 43858067710). Every
+          # command gets its own deadline and its failure is fine.
+          timeout 30 adb logcat -d > "$RUNNER_TEMP/brama-dumps/logcat.txt" 2>/dev/null || true
           for c in "$BRAMA_RUN-octo" "$BRAMA_RUN-navidrome" "$BRAMA_RUN-shim"; do
-            docker logs "$c" > "$RUNNER_TEMP/brama-dumps/$c.log" 2>&1 || true
+            timeout 30 docker logs "$c" > "$RUNNER_TEMP/brama-dumps/$c.log" 2>&1 || true
           done
       - uses: actions/upload-artifact@v7
         if: always()
