@@ -274,7 +274,15 @@ jobs:
           # first step of this job put the SDK on the PATH, and the AVD home
           # is pinned there too, so avdmanager and the emulator agree on
           # where the AVD lives.
-          sdkmanager --install "system-images;android-36;google_apis;x86_64" >/dev/null
+          # The image download is as flaky as any other (run 43890190905: the
+          # SDK package came down cut off -- "Premature EOF" -- after four
+          # green runs), so it gets the same retries as the APK download.
+          image_ok=""
+          for i in 1 2 3; do
+            sdkmanager --install "system-images;android-36;google_apis;x86_64" >/dev/null && { image_ok=1; break; }
+            sleep 10
+          done
+          [ -n "$image_ok" ] || { echo "::error::The system image did not come down in three tries."; exit 1; }
           echo no | avdmanager create avd --force -n "$BRAMA_RUN" \
             -k "system-images;android-36;google_apis;x86_64" --device pixel
           [ -f "$ANDROID_AVD_HOME/$BRAMA_RUN.ini" ] || {
