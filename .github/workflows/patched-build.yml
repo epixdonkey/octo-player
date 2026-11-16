@@ -751,7 +751,20 @@ jobs:
           await_text "Legacy sign-in" 15 scroll || { shot sign-in-no-legacy; echo "::error::The Legacy sign-in row never appeared."; exit 1; }
           toggle_beside "Legacy sign-in" || { shot sign-in-legacy; echo "::error::The Legacy sign-in switch could not be tapped."; exit 1; }
           sleep 1
-          swipe_up; sleep 1
+          # The Legacy row sits below the middle, and reaching it left the
+          # viewport low: the submit button now waits ABOVE the screen (run
+          # 43949964546, where the on-screen filter rightly refused to tap).
+          # Walk the form back up until the button itself is on screen --
+          # clickable and all, not the app bar's title -- and then press it.
+          up=""
+          for i in 1 2 3; do
+            dump submit-check >/dev/null
+            cp "$RUNNER_TEMP/brama-dumps/submit-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+            if [ -n "$(nodes_with "Sign in" tap)" ]; then up=1; break; fi
+            adb shell input swipe 540 600 540 1800 400
+            sleep 1
+          done
+          [ -n "$up" ] || { shot sign-in-submit-offscreen; echo "::error::The Sign in button never came back into view."; exit 1; }
 
           rests_before="$(docker logs "$BRAMA_RUN-octo" 2>&1 | grep -c "GET /rest" || true)"
           tap_text "Sign in" || { shot sign-in-submit; echo "::error::The Sign in button could not be tapped."; exit 1; }
