@@ -659,7 +659,12 @@ jobs:
           adb shell input keyevent 66
           tap_edit 2 || { shot sign-in-pass; echo "::error::The password field never appeared."; exit 1; }
           type "$BRAMA_PASS"
-          adb shell input keyevent 111   # the keyboard down: it hides the rows below
+          # ESC alone did not always put the keyboard away (run 43893718824:
+          # the Advanced fold stayed hidden behind it although its await
+          # scrolled), and a swipe over an open keyboard scrolls nothing --
+          # TAB walks the focus off the text field, which closes it.
+          adb shell input keyevent 111
+          adb shell input keyevent 61
 
           await_text "Advanced" 15 scroll || { shot sign-in-no-advanced; echo "::error::The form's Advanced fold never appeared."; exit 1; }
           tap_text "Advanced" || { shot sign-in-advanced; echo "::error::The Advanced fold could not be tapped."; exit 1; }
