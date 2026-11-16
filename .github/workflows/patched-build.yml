@@ -478,13 +478,46 @@ jobs:
             sub "getPlaylists.view?" | jq -r --arg n "$1" \
               '.["subsonic-response"].playlists.playlist[]? | select(.name == $n) | .id' | head -1
           }
-          playlist_entry_count() { # playlist_entry_count <id>
-            sub "getPlaylist.view?id=$1&" \
-              | jq -r '.["subsonic-response"].playlist.songCount // ([.["subsonic-response"].playlist.entry // []] | length)'
+          playlist_entry_count() { # playlist_entry_count <id> -> songCount, or api-error
+            local body v
+            body="$(sub "getPlaylist.view?id=$1&")"
+            v="$(jq -r 'if .["subsonic-response"].error or (.["subsonic-response"].playlist == null) then empty
+                        else (.["subsonic-response"].playlist.songCount // (.["subsonic-response"].playlist.entry | length)) end' <<<"$body" 2>/dev/null)"
+            [ -n "$v" ] || v="api-error"
+            echo "$v"
           }
-          playlist_external_count() { # playlist_external_count <id>
-            sub "getPlaylist.view?id=$1&" \
-              | jq ' [.["subsonic-response"].playlist.entry // [] | .[] | select(.isExternal == true)] | length'
+          playlist_external_count() { # playlist_external_count <id> -> found rows, or api-error
+            local body v
+            body="$(sub "getPlaylist.view?id=$1&")"
+            v="$(jq -r 'if .["subsonic-response"].error or (.["subsonic-response"].playlist == null) then empty
+                        else ([.["subsonic-response"].playlist.entry // [] | .[] | select(.isExternal == true)] | length) end' <<<"$body" 2>/dev/null)"
+            [ -n "$v" ] || v="api-error"
+            echo "$v"
+          }
+          # A probe with patience: the app's sync waits out its own 1.5 s
+          # debounce before it sends, so a count read right after a tap races
+          # it. Poll the counter until it answers the expectation, and let
+          # the check fail on the last value seen when it never does.
+          await_count() { # await_count <expected> <counter command...>
+            local want="$1"; shift
+            local v="" i
+            for i in $(seq 1 8); do
+              v="$("$@" 2>/dev/null)"
+              [ "$v" = "$want" ] && { echo "$v"; return 0; }
+              sleep 2
+            done
+            echo "${v:-none}"
+            return 1
+          }
+          await_id() { # await_id <name> -> the playlist's id, once the server lists it
+            local i id
+            for i in $(seq 1 8); do
+              id="$(playlist_id_by_name "$1")"
+              [ -n "$id" ] && { echo "$id"; return 0; }
+              sleep 2
+            done
+            echo ""
+            return 1
           }
 
           # The walks the steps share: open the app's search, and reach the
@@ -542,8 +575,9 @@ jobs:
             check S "sign in to the bridge" "signed in" "$(screen_texts sign-in-failed | head -40 | tr '\n' ';')"
             verdict S
           fi
+          await_text "Home" 15 || true   # the app lands on Home, the first tab
           shot signed-in
-          check S "the patched app signed in to the bridge" "Library" "$(screen_texts signed-in | grep -m1 -E "Home|Library|Search" || echo none)"
+          check S "the patched app signed in to the bridge" "Home" "$(screen_texts signed-in | grep -m1 "Home" || echo none)"
           verdict S
 
       # W1 (R1, a new playlist): search answers an outside song through the
@@ -556,6 +590,7 @@ jobs:
           set -euo pipefail
           source "$RUNNER_TEMP/brama-lib.sh"
           search_for Mozart
+          await_text "$F1_TITLE" 15 scroll || true   # found rows ride discovery, which can be slow
           check W1 "the search answers the found song" "$F1_TITLE" "$(screen_texts w1-search | grep -F "$F1_TITLE" || echo none)"
           open_menu_on_row "$F1_TITLE" || { shot w1-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
           await_text "Add to playlist" 10 || { shot w1-menu; echo "::error::The found song's menu offers no Add to playlist."; exit 1; }
@@ -576,11 +611,10 @@ jobs:
           check W1 "the playlist renders the found song" "$F1_TITLE" "$(screen_texts w1-open | grep -F "$F1_TITLE" || echo none)"
           shot w1-playlist
 
-          sleep 12   # the sync's 1.5 s debounce, and a margin
-          PID="$(playlist_id_by_name Znalezione)"
+          PID="$(await_id Znalezione)"
           [ -n "$PID" ] && check W1 "getPlaylist answers the new playlist" "id" "id $PID" \
             || check W1 "getPlaylist answers the new playlist" "id" "none"
-          check W1 "the server holds the found song after sync" "1" "$(playlist_external_count "${PID:-none}")"
+          check W1 "the server holds the found song after sync" "1" "$(await_count 1 playlist_external_count "${PID:-none}")"
           verdict W1
 
       # W2 (R1, an existing playlist): the same menu, an existing library
@@ -594,9 +628,9 @@ jobs:
           await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
           await_text "$W2_NAME" 15 scroll
           check W2 "the picker lists the existing library playlist" "$W2_NAME" "$(screen_texts w2-picker | grep -m1 "$W2_NAME" || echo none)"
-          tap_text "$W2_NAME"; sleep 3
+          tap_text "$W2_NAME"
           shot w2-added
-          check W2 "the server playlist grew to three songs" "3" "$(playlist_entry_count "$W2_ID")"
+          check W2 "the server playlist grew to three songs" "3" "$(await_count 3 playlist_entry_count "$W2_ID")"
           open_playlists
           await_text "$W2_NAME" 15 scroll && tap_text "$W2_NAME"; sleep 3
           await_text "$F1_TITLE" 15 scroll
@@ -630,13 +664,13 @@ jobs:
           tap_edit 0
           type "${W3_NAME// /%s}"
           adb shell input keyevent 111
-          tap_text "Create"; sleep 3
+          tap_text "Create"
           shot w3-created
-          PID="$(playlist_id_by_name "$W3_NAME")"
+          PID="$(await_id "$W3_NAME")"
           [ -n "$PID" ] && check W3 "getPlaylist answers the mixed playlist" "id" "id $PID" \
             || check W3 "getPlaylist answers the mixed playlist" "id" "none"
-          check W3 "four rows landed by one action" "4" "$(playlist_entry_count "${PID:-none}")"
-          check W3 "two of them are found songs" "2" "$(playlist_external_count "${PID:-none}")"
+          check W3 "four rows landed by one action" "4" "$(await_count 4 playlist_entry_count "${PID:-none}")"
+          check W3 "two of them are found songs" "2" "$(await_count 2 playlist_external_count "${PID:-none}")"
           verdict W3
 
       # W4 (R3): on a found song the menu names the last playlist and takes
@@ -651,10 +685,10 @@ jobs:
           await_text "Add to last playlist" 10
           check W4 "the menu names the last playlist" "Add to last playlist: $W3_NAME" \
             "$(screen_texts w4-menu | grep -m1 "Add to last playlist" || echo none)"
-          tap_text "Add to last playlist"; sleep 3
+          tap_text "Add to last playlist"
           shot w4-done
-          PID="$(playlist_id_by_name "$W3_NAME")"
-          check W4 "the last playlist grew to five songs, no picker opened" "5" "$(playlist_entry_count "${PID:-none}")"
+          PID="$(await_id "$W3_NAME")"
+          check W4 "the last playlist grew to five songs, no picker opened" "5" "$(await_count 5 playlist_entry_count "${PID:-none}")"
           verdict W4
 
       # W5 (R4): play a library tone, push two found songs in as Play next,
@@ -682,21 +716,25 @@ jobs:
           tap_edit 0
           type "$W5_NAME"
           adb shell input keyevent 111
-          tap_text "Create"; sleep 3
+          tap_text "Create"
           shot w5-saved
-          PID="$(playlist_id_by_name "$W5_NAME")"
+          PID="$(await_id "$W5_NAME")"
           [ -n "$PID" ] && check W5 "getPlaylist answers the queue's playlist" "id" "id $PID" \
             || check W5 "getPlaylist answers the queue's playlist" "id" "none"
-          check W5 "the queue's three rows all landed" "3" "$(playlist_entry_count "${PID:-none}")"
-          check W5 "the found rows landed with them" "2" "$(playlist_external_count "${PID:-none}")"
+          check W5 "the queue's three rows all landed" "3" "$(await_count 3 playlist_entry_count "${PID:-none}")"
+          check W5 "the found rows landed with them" "2" "$(await_count 2 playlist_external_count "${PID:-none}")"
           verdict W5
 
       # W7 (R6): the About page says why the updater sleeps, and the session's
-      # log holds no line of an update attempt.
+      # log holds no line of an update attempt. The step starts from a clean
+      # shell: the player W5 leaves open hides the bottom bar, the only road
+      # to Settings.
       - name: W7 - the updater asleep
         run: |
           set -euo pipefail
           source "$RUNNER_TEMP/brama-lib.sh"
+          launch
+          await_text "Home" 15 || true
           tap_text "Settings"; sleep 2
           await_text "About" 15 scroll && tap_text "About"; sleep 2
           await_text "patched build" 10 scroll
@@ -747,10 +785,10 @@ jobs:
           tap_edit 0
           type "$FAM"
           adb shell input keyevent 111
-          tap_text "Create"; sleep 4
+          tap_text "Create"
           shot w8-family-created
 
-          FID="$(playlist_id_by_name "$BARE")"
+          FID="$(await_id "$BARE")"
           [ -n "$FID" ] && check W8 "the #family create was captured as a family playlist (of-id)" "of" "${FID:0:2}" \
             || check W8 "the #family create was captured as a family playlist (of-id)" "of" "none"
           # The family row's shape, not a name with the prefix in it: the
@@ -763,8 +801,8 @@ jobs:
           open_menu_on_row "$F2_TITLE" && await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
           await_text "$BARE" 15 scroll
           check W8 "the picker lists the family playlist" "$BARE" "$(screen_texts w8-picker | grep -m1 "$BARE" || echo none)"
-          tap_text "$BARE"; sleep 3
-          check W8 "the family playlist took the added song" "1" "$(playlist_entry_count "${FID:-none}")"
+          tap_text "$BARE"
+          check W8 "the family playlist took the added song" "1" "$(await_count 1 playlist_entry_count "${FID:-none}")"
 
           curl -fsS "$BRAMA_BASE/rest/updatePlaylist.view?playlistId=$(urlenc "$FID")&name=$(urlenc "#family $BARE dwa")&$BRAMA_AUTH" \
             | jq -e '.["subsonic-response"].status == "ok"' >/dev/null
