@@ -396,19 +396,39 @@ jobs:
             return 1
           }
 
-          nodes_with() { # nodes_with <text> -> the first node naming it, as a bounds centre
+          # Exact first: a label that is a substring of another label on the
+          # same screen must still find its own node (run 43933032189: "Sign
+          # in" kept landing on "Sign in to your music server", the form's
+          # heading, so the button was never pressed and the server heard
+          # nothing). The whole tree is scanned for an exact text or content-
+          # description before any substring match is used.
+          nodes_with() { # nodes_with <text> -> that node's bounds centre; exact beats substring
             python3 - "$RUNNER_TEMP/brama-dumps/tap.xml" "$1" <<'PY'
           import sys, re, xml.etree.ElementTree as ET
           root = ET.parse(sys.argv[1]).getroot()
           want = sys.argv[2]
+          def centre(node):
+              m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+              if not m:
+                  return None
+              x1, y1, x2, y2 = map(int, m.groups())
+              return ((x1 + x2) // 2, (y1 + y2) // 2)
+          substring = None
           for node in root.iter("node"):
               for value in (node.get("text"), node.get("content-desc")):
-                  if value and want in value:
-                      m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
-                      if m:
-                          x1, y1, x2, y2 = map(int, m.groups())
-                          print((x1 + x2) // 2, (y1 + y2) // 2)
+                  if not value:
+                      continue
+                  if value == want:
+                      c = centre(node)
+                      if c:
+                          print(*c)
                           sys.exit(0)
+                  if substring is None and want in value:
+                      c = centre(node)
+                      if c:
+                          substring = c
+          if substring:
+              print(*substring)
           PY
           }
           await_text() { # await_text <text> [tries [scroll]]
@@ -578,6 +598,15 @@ jobs:
             launch
             tap_text "Search" || tap_edit 0
             sleep 2
+            # A search on a dead session answers nothing (runs 43898136604
+            # and 43933032189): the empty screen itself says when no server
+            # is signed in, and that must be caught before anything is typed.
+            dump search-session >/dev/null
+            if grep -q "Search the music on your phone" "$RUNNER_TEMP/brama-dumps/search-session.xml"; then
+              shot search-signed-out
+              echo "::error::The search screen says the phone is signed out; the session is dead."
+              exit 1
+            fi
             tap_edit 0 || tap_text "Search songs, albums, artists"
             type "$1"
             adb shell input keyevent 66
@@ -695,6 +724,7 @@ jobs:
           sleep 1
           swipe_up; sleep 1
 
+          rests_before="$(docker logs "$BRAMA_RUN-octo" 2>&1 | grep -c "GET /rest" || true)"
           tap_text "Sign in" || { shot sign-in-submit; echo "::error::The Sign in button could not be tapped."; exit 1; }
           gone=""
           for i in $(seq 1 60); do
@@ -706,9 +736,30 @@ jobs:
             check S "sign in to the bridge" "signed in" "$(screen_texts sign-in-failed | head -40 | tr '\n' ';')"
             verdict S
           fi
-          await_text "Home" 15 || true   # the app lands on Home, the first tab
+          # Home's tab lives in the bottom bar of every screen and witnessed
+          # nothing (run 43933032189 passed on it while the form still
+          # stood); the Home page's own heading does.
+          await_text "Music on this phone" 20 || true
           shot signed-in
-          check S "the patched app signed in to the bridge" "Home" "$(screen_texts signed-in | grep -m1 "Home" || echo none)"
+          check S "the patched app signed in to the bridge" "Music on this phone" "$(screen_texts signed-in | grep -m1 "Music on this phone" || echo none)"
+
+          # And the bridge heard it: only what the sign-in itself moved. A
+          # log that carries no request lines at all says nothing either
+          # way, and is said so.
+          sleep 5
+          rests_after="$(docker logs "$BRAMA_RUN-octo" 2>&1 | grep -c "GET /rest" || true)"
+          if [ "$rests_after" -gt 0 ] || [ "$rests_before" -gt 0 ]; then
+            moved=$((rests_after - rests_before))
+            if [ "$moved" -ge 1 ]; then
+              PASS=$((PASS+1)); echo "[S] PASS: the bridge heard the sign-in ($moved new /rest requests)"
+              echo "| S | PASS | the bridge heard the sign-in ($moved new /rest requests) |" >> "$RUNNER_TEMP/wtable.md"
+            else
+              FAIL=$((FAIL+1)); echo "[S] FAIL: the bridge heard nothing new (before $rests_before, after $rests_after)"
+              echo "| S | FAIL | the bridge heard nothing new |" >> "$RUNNER_TEMP/wtable.md"
+            fi
+          else
+            echo "::notice::This server's log carries no request lines; the Home heading alone witnesses the sign-in."
+          fi
           verdict S
 
       # W1 (R1, a new playlist): search answers an outside song through the
