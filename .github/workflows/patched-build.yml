@@ -389,54 +389,83 @@ jobs:
             for i in 1 2 3 4 5; do
               dump back >/dev/null
               cp "$RUNNER_TEMP/brama-dumps/back.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
-              [ -n "$(nodes_with "Settings")" ] && return 0
+              [ -n "$(nodes_with "Settings" read)" ] && return 0
               adb shell input keyevent 4
               sleep 1
             done
             return 1
           }
 
-          # Exact first: a label that is a substring of another label on the
-          # same screen must still find its own node (run 43933032189: "Sign
-          # in" kept landing on "Sign in to your music server", the form's
-          # heading, so the button was never pressed and the server heard
-          # nothing). The whole tree is scanned for an exact text or content-
-          # description before any substring match is used.
-          nodes_with() { # nodes_with <text> -> that node's bounds centre; exact beats substring
-            python3 - "$RUNNER_TEMP/brama-dumps/tap.xml" "$1" <<'PY'
+          # A match must be usable, not just exact (run 43937576296: the form
+          # carries TWO "Sign in" nodes -- the app bar's title, sometimes
+          # dumped high up, and the submit button; the first-in-document won
+          # and the tap landed in the bar). Modes: "tap" wants the node or an
+          # ancestor (six levels up) clickable and the bounds fully on screen;
+          # "read" takes any node; "read-onscreen" also needs the bounds on
+          # screen. An exact match always beats a substring, and a usable
+          # match always beats an unusable one.
+          nodes_with() { # nodes_with <text> [tap|read|read-onscreen]
+            python3 - "$RUNNER_TEMP/brama-dumps/tap.xml" "$1" "${2:-read}" <<'PY'
           import sys, re, xml.etree.ElementTree as ET
           root = ET.parse(sys.argv[1]).getroot()
-          want = sys.argv[2]
-          def centre(node):
-              m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
-              if not m:
-                  return None
-              x1, y1, x2, y2 = map(int, m.groups())
-              return ((x1 + x2) // 2, (y1 + y2) // 2)
-          substring = None
+          want, mode = sys.argv[2], sys.argv[3]
+          m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", root.get("bounds", "") or "")
+          W, H = (int(m.group(3)), int(m.group(4))) if m else (10**9, 10**9)
+          parents = {}
+          def walk(node, parent):
+              parents[node] = parent
+              for child in node:
+                  walk(child, node)
+          walk(root, None)
+          def rect(node):
+              mm = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+              return tuple(map(int, mm.groups())) if mm else None
+          def usable(node):
+              r = rect(node)
+              if not r or not (r[0] < r[2] and r[1] < r[3]):
+                  return False
+              if mode != "read" and not (r[0] >= 0 and r[1] >= 0 and r[2] <= W and r[3] <= H):
+                  return False
+              if mode == "tap":
+                  n = node
+                  for _ in range(7):
+                      if n is None:
+                          break
+                      if n.get("clickable") == "true":
+                          return True
+                      n = parents.get(n)
+                  return False
+              return True
+          exact = sub = None
           for node in root.iter("node"):
               for value in (node.get("text"), node.get("content-desc")):
                   if not value:
                       continue
+                  r = rect(node)
+                  if not r:
+                      continue
+                  c = ((r[0] + r[2]) // 2, (r[1] + r[3]) // 2)
                   if value == want:
-                      c = centre(node)
-                      if c:
+                      if usable(node):
                           print(*c)
                           sys.exit(0)
-                  if substring is None and want in value:
-                      c = centre(node)
-                      if c:
-                          substring = c
-          if substring:
-              print(*substring)
+                      if exact is None:
+                          exact = c
+                  elif want in value and sub is None and usable(node):
+                      sub = c
+          if sub:
+              print(*sub)
+          elif mode == "read" and exact:
+              print(*exact)
           PY
           }
           await_text() { # await_text <text> [tries [scroll]]
-            local i
+            local i mode
+            mode="read"; [ "${3:-}" = scroll ] && mode="read-onscreen"
             for i in $(seq 1 "${2:-20}"); do
               dump await >/dev/null
               cp "$RUNNER_TEMP/brama-dumps/await.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
-              if [ -n "$(nodes_with "$1")" ]; then return 0; fi
+              if [ -n "$(nodes_with "$1" "$mode")" ]; then return 0; fi
               [ "${3:-}" = scroll ] && swipe_up
               sleep 2
             done
@@ -444,7 +473,7 @@ jobs:
           }
           tap_text() { # tap_text <text> -> taps the centre of the first node naming it
             dump tap >/dev/null
-            local xy; xy="$(nodes_with "$1")"
+            local xy; xy="$(nodes_with "$1" tap)"
             [ -n "$xy" ] && adb shell input tap $xy && return 0
             return 1
           }
@@ -470,7 +499,7 @@ jobs:
           longpress() { # longpress <text> -> a 700 ms press on the row's centre
             dump press >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/press.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
-            local xy; xy="$(nodes_with "$1")"
+            local xy; xy="$(nodes_with "$1" tap)"
             [ -n "$xy" ] && adb shell input swipe $xy $xy 700 && return 0
             return 1
           }
