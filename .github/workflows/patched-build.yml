@@ -513,17 +513,28 @@ jobs:
           # empty after the tap -- the dialog's animation had stolen the
           # focus -- and the text went nowhere). Tap the field, prove it is
           # focused, type, prove the text landed; three tries, then loud.
-          type_into() { # type_into <index> <text> [shot-tag]
-            local idx="$1" want="$2" tag="${3:-field}" i ok="" state
+          # Verification modes: "full" (default) proves the text itself --
+          # honest for open fields; "length" proves the field answered with
+          # something, which is all a masked password can show (run
+          # 44006078459: the dots never spell the password, and the check
+          # died on its own mask); "none" trusts the focus alone.
+          type_into() { # type_into <index> <text> [shot-tag] [full|length|none]
+            local idx="$1" want="$2" tag="${3:-field}" verify="${4:-full}" i ok="" state text
             for i in 1 2 3; do
               tap_edit "$idx" || { sleep 1; continue; }
               dump typecheck >/dev/null
               state="$(edit_state "$idx")"
               [ "$(awk '{print $1}' <<<"$state")" = "true" ] || { sleep 1; continue; }
               type "$want"
+              [ "$verify" = "none" ] && { ok=1; break; }
               dump typecheck >/dev/null
               state="$(edit_state "$idx")"
-              if grep -qF "$want" <<<"${state#True }"; then ok=1; break; fi
+              text="${state#true }"
+              if [ "$verify" = "full" ]; then
+                grep -qF "$want" <<<"$text" && { ok=1; break; }
+              elif [ "$verify" = "length" ]; then
+                [ -n "$text" ] && { ok=1; break; }
+              fi
               sleep 1
             done
             [ -n "$ok" ] || { shot "$tag-empty"; echo "::error::The field never took the text \"$want\"."; exit 1; }
@@ -765,7 +776,7 @@ jobs:
           fi
           type_into 1 "admin" sign-in-user
           adb shell input keyevent 66
-          type_into 2 "$BRAMA_PASS" sign-in-pass
+          type_into 2 "$BRAMA_PASS" sign-in-pass length
           # ESC alone did not always put the keyboard away (run 43893718824:
           # the Advanced fold stayed hidden behind it although its await
           # scrolled), and a swipe over an open keyboard scrolls nothing --
