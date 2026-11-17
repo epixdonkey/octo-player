@@ -825,9 +825,14 @@ jobs:
           await_text "Add to playlist" 10 || { shot w1-menu; echo "::error::The found song's menu offers no Add to playlist."; exit 1; }
           check W1 "the found song's menu offers Add to playlist" "Add to playlist" "$(screen_texts w1-menu | grep -m1 "Add to playlist" || echo none)"
           tap_text "Add to playlist" || { shot w1-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
-          # The picker opens straight into its naming dialog (run 43996895386's
-          # dump: no "New playlist" button exists there); the dialog's own
-          # field marker is the honest thing to await.
+          # The picker lists the playlists and its New playlist action, and
+          # the action opens the naming dialog (run 18's dump read the
+          # dialog because a tap had already gone through; run 19's shows
+          # the picker whole). Picker first, then the action, then the
+          # dialog's own field marker.
+          await_text "New playlist" 10 scroll \
+            || { shot w1-no-picker; echo "::error::The picker's New playlist never appeared."; exit 1; }
+          tap_text "New playlist" || { shot w1-newplaylist; echo "::error::The New playlist action could not be tapped."; exit 1; }
           await_text "Playlist name" 10 \
             || { shot w1-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           tap_edit 0
@@ -909,9 +914,14 @@ jobs:
           await_text "Add to playlist" 10 || { shot w3-no-bar; echo "::error::The selection bar did not appear."; exit 1; }
           check W3 "the selection bar offers Add to playlist" "Add to playlist" "$(screen_texts w3-bar | grep -m1 "Add to playlist" || echo none)"
           tap_text "Add to playlist" || { shot w3-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
-          # The picker opens straight into its naming dialog (run 43996895386's
-          # dump: no "New playlist" button exists there); the dialog's own
-          # field marker is the honest thing to await.
+          # The picker lists the playlists and its New playlist action, and
+          # the action opens the naming dialog (run 18's dump read the
+          # dialog because a tap had already gone through; run 19's shows
+          # the picker whole). Picker first, then the action, then the
+          # dialog's own field marker.
+          await_text "New playlist" 10 scroll \
+            || { shot w3-no-picker; echo "::error::The picker's New playlist never appeared."; exit 1; }
+          tap_text "New playlist" || { shot w3-newplaylist; echo "::error::The New playlist action could not be tapped."; exit 1; }
           await_text "Playlist name" 10 \
             || { shot w3-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           tap_edit 0
@@ -1072,9 +1082,14 @@ jobs:
           open_menu_on_row "$F1_TITLE" || { shot w8-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
           await_text "Add to playlist" 10 || { shot w8-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
           tap_text "Add to playlist" || { shot w8-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
-          # The picker opens straight into its naming dialog (run 43996895386's
-          # dump: no "New playlist" button exists there); the dialog's own
-          # field marker is the honest thing to await.
+          # The picker lists the playlists and its New playlist action, and
+          # the action opens the naming dialog (run 18's dump read the
+          # dialog because a tap had already gone through; run 19's shows
+          # the picker whole). Picker first, then the action, then the
+          # dialog's own field marker.
+          await_text "New playlist" 10 scroll \
+            || { shot w8-no-picker; echo "::error::The picker's New playlist never appeared."; exit 1; }
+          tap_text "New playlist" || { shot w8-newplaylist; echo "::error::The New playlist action could not be tapped."; exit 1; }
           await_text "Playlist name" 10 \
             || { shot w8-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           tap_edit 0
