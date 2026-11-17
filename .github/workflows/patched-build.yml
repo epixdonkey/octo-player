@@ -589,7 +589,11 @@ jobs:
               x1, y1, x2, y2 = map(int, m.groups())
               cy = (y1 + y2) // 2
               if row[1] - 20 <= cy <= row[3] + 20:
-                  c = (node, ((x1 + x2) // 2, cy))
+                  # Tap the switch itself, not the row's middle: the row is
+                  # toggleable, but the switch's own onCheckedChange is the
+                  # sure hand (run 44094336562: the row's centre changed
+                  # nothing), and it lives on the right, by the row's end.
+                  c = (node, (x2 - 80, cy))
                   if x1 > row[0] and right is None:
                       right = c
                   if x1 <= row[2] and x2 >= row[0] and overlap is None:
@@ -644,7 +648,11 @@ jobs:
               x1, y1, x2, y2 = map(int, m.groups())
               cy = (y1 + y2) // 2
               if row[1] - 20 <= cy <= row[3] + 20:
-                  c = ((x1 + x2) // 2, cy)
+                  # Tap the switch itself, not the row's middle: the row is
+                  # toggleable, but the switch's own onCheckedChange is the
+                  # sure hand (run 44094336562: the row's centre changed
+                  # nothing), and it lives on the right, by the row's end.
+                  c = (x2 - 80, cy)
                   if x1 > row[0] and right is None:
                       right = c
                   if x1 <= row[2] and x2 >= row[0] and overlap is None:
