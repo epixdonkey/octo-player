@@ -580,7 +580,10 @@ jobs:
                       continue
                   x1, y1, x2, y2 = map(int, m.groups())
                   cy = (y1 + y2) // 2
-                  if row[1] - 20 <= cy <= row[3] + 20 and x1 > row[0]:
+                  # A settings row's checkable often spans the whole row,
+                  # starting left of the text itself (run 44086226320), so
+                  # any overlap in both axes is the row's switch.
+                  if row[1] - 20 <= cy <= row[3] + 20 and x1 <= row[2] and x2 >= row[0]:
                       best = (node, ((x1 + x2) // 2, cy))
           if best:
               node, (x, y) = best
@@ -616,7 +619,7 @@ jobs:
                       continue
                   x1, y1, x2, y2 = map(int, m.groups())
                   cy = (y1 + y2) // 2
-                  if row[1] - 20 <= cy <= row[3] + 20 and x1 > row[0]:
+                  if row[1] - 20 <= cy <= row[3] + 20 and x1 <= row[2] and x2 >= row[0]:
                       best = ((x1 + x2) // 2, cy)
           if best:
               print(*best)
