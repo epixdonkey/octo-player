@@ -876,8 +876,18 @@ jobs:
           await_text "Playlist name" 10 \
             || { shot w1-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           type_into 0 "Znalezione" w1-name
-          adb shell input keyevent 111
-          adb shell input keyevent 61
+          # The field must still hold the name when Create is reached (run
+          # 44008986015: typing had been proven, and the field stood empty
+          # by the button anyway -- the keyboard keys between the two had
+          # cleared it). One retype, then the word.
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          if [ -z "${s#* }" ]; then
+            type_into 0 "Znalezione" w1-retype
+          fi
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          [ -n "${s#* }" ] || { shot w1-field-lost; echo "::error::The name field stood empty at Create."; exit 1; }
           # The dialog relayouts once the keyboard is gone, and Create can end
           # below the screen (run 43996895386: a bare tap then died in
           # silence). Walk it back into view, then press it.
@@ -968,8 +978,18 @@ jobs:
           await_text "Playlist name" 10 \
             || { shot w3-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           type_into 0 "$W3_NAME" w3-name
-          adb shell input keyevent 111
-          adb shell input keyevent 61
+          # The field must still hold the name when Create is reached (run
+          # 44008986015: typing had been proven, and the field stood empty
+          # by the button anyway -- the keyboard keys between the two had
+          # cleared it). One retype, then the word.
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          if [ -z "${s#* }" ]; then
+            type_into 0 "$W3_NAME" w3-retype
+          fi
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          [ -n "${s#* }" ] || { shot w3-field-lost; echo "::error::The name field stood empty at Create."; exit 1; }
           # The dialog relayouts once the keyboard is gone, and Create can end
           # below the screen (run 43996895386: a bare tap then died in
           # silence). Walk it back into view, then press it.
@@ -1044,8 +1064,18 @@ jobs:
             || { shot w5-no-save; echo "::error::The More menu offers no Save as playlist."; exit 1; }
           tap_text "Save as playlist" || { shot w5-save; echo "::error::The Save as playlist could not be tapped."; exit 1; }; sleep 2
           type_into 0 "$W5_NAME" w5-name
-          adb shell input keyevent 111
-          adb shell input keyevent 61
+          # The field must still hold the name when Create is reached (run
+          # 44008986015: typing had been proven, and the field stood empty
+          # by the button anyway -- the keyboard keys between the two had
+          # cleared it). One retype, then the word.
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          if [ -z "${s#* }" ]; then
+            type_into 0 "$W5_NAME" w5-retype
+          fi
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          [ -n "${s#* }" ] || { shot w5-field-lost; echo "::error::The name field stood empty at Create."; exit 1; }
           # The dialog relayouts once the keyboard is gone, and Create can end
           # below the screen (run 43996895386: a bare tap then died in
           # silence). Walk it back into view, then press it.
@@ -1141,8 +1171,18 @@ jobs:
           await_text "Playlist name" 10 \
             || { shot w8-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           type_into 0 "#family Brama $BRAMA_RUN" w8-family-name
-          adb shell input keyevent 111
-          adb shell input keyevent 61
+          # The field must still hold the name when Create is reached (run
+          # 44008986015: typing had been proven, and the field stood empty
+          # by the button anyway -- the keyboard keys between the two had
+          # cleared it). One retype, then the word.
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          if [ -z "${s#* }" ]; then
+            type_into 0 "#family Brama $BRAMA_RUN" w8-retype
+          fi
+          dump typecheck >/dev/null
+          s="$(edit_state 0)"
+          [ -n "${s#* }" ] || { shot w8-field-lost; echo "::error::The name field stood empty at Create."; exit 1; }
           # The dialog relayouts once the keyboard is gone, and Create can end
           # below the screen (run 43996895386: a bare tap then died in
           # silence). Walk it back into view, then press it.
