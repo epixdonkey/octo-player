@@ -432,7 +432,10 @@ jobs:
                       if n is None:
                           break
                       if n.get("clickable") == "true":
-                          return True
+                          # A disabled button taps nowhere (run 44003221446:
+                          # Create stayed disabled over an empty field), so a
+                          # disabled clickable ancestor does not count.
+                          return n.get("enabled", "true") == "true"
                       n = parents.get(n)
                   return False
               return True
@@ -495,7 +498,36 @@ jobs:
             [ -n "$xy" ] && adb shell input tap $xy && return 0
             return 1
           }
-          type() { adb shell input text "$1"; }
+          type() { adb shell input text "${1// /%s}"; }
+          edit_state() { # edit_state <index> -> "<focused> <text>" of that text field
+            python3 - "$RUNNER_TEMP/brama-dumps/typecheck.xml" "$1" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          fields = [n for n in root.iter("node") if n.get("class") == "android.widget.EditText"]
+          i = int(sys.argv[2])
+          if i < len(fields):
+              print(fields[i].get("focused"), (fields[i].get("text") or "").strip())
+          PY
+          }
+          # Typing is proven, not assumed (run 44003221446: the field sat
+          # empty after the tap -- the dialog's animation had stolen the
+          # focus -- and the text went nowhere). Tap the field, prove it is
+          # focused, type, prove the text landed; three tries, then loud.
+          type_into() { # type_into <index> <text> [shot-tag]
+            local idx="$1" want="$2" tag="${3:-field}" i ok="" state
+            for i in 1 2 3; do
+              tap_edit "$idx" || { sleep 1; continue; }
+              dump typecheck >/dev/null
+              state="$(edit_state "$idx")"
+              [ "$(awk '{print $1}' <<<"$state")" = "true" ] || { sleep 1; continue; }
+              type "$want"
+              dump typecheck >/dev/null
+              state="$(edit_state "$idx")"
+              if grep -qF "$want" <<<"${state#True }"; then ok=1; break; fi
+              sleep 1
+            done
+            [ -n "$ok" ] || { shot "$tag-empty"; echo "::error::The field never took the text \"$want\"."; exit 1; }
+          }
           longpress() { # longpress <text> -> a 700 ms press on the row's centre
             dump press >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/press.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
@@ -724,19 +756,16 @@ jobs:
           tap_text "Sign in to a server" || { shot sign-in-entry; echo "::error::The Sign in to a server entry could not be tapped."; exit 1; }
           await_text "Sign in to your music server" 30 || { shot sign-in-no-form; echo "::error::The sign-in form never appeared."; exit 1; }
 
-          tap_edit 0 || { shot sign-in-address; echo "::error::The address field never appeared."; exit 1; }
-          type "10.0.2.2:$OCTO_PORT"
+          type_into 0 "10.0.2.2:$OCTO_PORT" sign-in-address
           adb shell input keyevent 66
           # The address field offers https unless told otherwise; the bridge is plain http.
           if await_text "Encrypted, https" 3; then
             tap_text "Encrypted, https" || { shot sign-in-scheme; echo "::error::The scheme toggle could not be tapped."; exit 1; }
             sleep 1
           fi
-          tap_edit 1 || { shot sign-in-user; echo "::error::The username field never appeared."; exit 1; }
-          type "admin"
+          type_into 1 "admin" sign-in-user
           adb shell input keyevent 66
-          tap_edit 2 || { shot sign-in-pass; echo "::error::The password field never appeared."; exit 1; }
-          type "$BRAMA_PASS"
+          type_into 2 "$BRAMA_PASS" sign-in-pass
           # ESC alone did not always put the keyboard away (run 43893718824:
           # the Advanced fold stayed hidden behind it although its await
           # scrolled), and a swipe over an open keyboard scrolls nothing --
@@ -835,8 +864,7 @@ jobs:
           tap_text "New playlist" || { shot w1-newplaylist; echo "::error::The New playlist action could not be tapped."; exit 1; }
           await_text "Playlist name" 10 \
             || { shot w1-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
-          tap_edit 0
-          type "Znalezione"
+          type_into 0 "Znalezione" w1-name
           adb shell input keyevent 111
           adb shell input keyevent 61
           # The dialog relayouts once the keyboard is gone, and Create can end
@@ -847,8 +875,12 @@ jobs:
             dump create-check >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
             if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
-            adb shell input swipe 540 600 540 1800 400
-            sleep 1
+            if [ -n "$(nodes_with "Create" read-onscreen)" ]; then
+              sleep 2   # visible but disabled: the field fills, it wakes
+            else
+              adb shell input swipe 540 600 540 1800 400
+              sleep 1
+            fi
           done
           [ -n "$up" ] || { shot w1-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
           tap_text "Create" || { shot w1-create; echo "::error::The Create button could not be tapped."; exit 1; }; sleep 3
@@ -924,8 +956,7 @@ jobs:
           tap_text "New playlist" || { shot w3-newplaylist; echo "::error::The New playlist action could not be tapped."; exit 1; }
           await_text "Playlist name" 10 \
             || { shot w3-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
-          tap_edit 0
-          type "${W3_NAME// /%s}"
+          type_into 0 "$W3_NAME" w3-name
           adb shell input keyevent 111
           adb shell input keyevent 61
           # The dialog relayouts once the keyboard is gone, and Create can end
@@ -936,8 +967,12 @@ jobs:
             dump create-check >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
             if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
-            adb shell input swipe 540 600 540 1800 400
-            sleep 1
+            if [ -n "$(nodes_with "Create" read-onscreen)" ]; then
+              sleep 2   # visible but disabled: the field fills, it wakes
+            else
+              adb shell input swipe 540 600 540 1800 400
+              sleep 1
+            fi
           done
           [ -n "$up" ] || { shot w3-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
           tap_text "Create" || { shot w3-create; echo "::error::The Create button could not be tapped."; exit 1; }
@@ -997,8 +1032,7 @@ jobs:
           await_text "Save as playlist" 10 \
             || { shot w5-no-save; echo "::error::The More menu offers no Save as playlist."; exit 1; }
           tap_text "Save as playlist" || { shot w5-save; echo "::error::The Save as playlist could not be tapped."; exit 1; }; sleep 2
-          tap_edit 0
-          type "$W5_NAME"
+          type_into 0 "$W5_NAME" w5-name
           adb shell input keyevent 111
           adb shell input keyevent 61
           # The dialog relayouts once the keyboard is gone, and Create can end
@@ -1009,8 +1043,12 @@ jobs:
             dump create-check >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
             if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
-            adb shell input swipe 540 600 540 1800 400
-            sleep 1
+            if [ -n "$(nodes_with "Create" read-onscreen)" ]; then
+              sleep 2   # visible but disabled: the field fills, it wakes
+            else
+              adb shell input swipe 540 600 540 1800 400
+              sleep 1
+            fi
           done
           [ -n "$up" ] || { shot w5-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
           tap_text "Create" || { shot w5-create; echo "::error::The Create button could not be tapped."; exit 1; }
@@ -1076,7 +1114,6 @@ jobs:
           # prefix (a plain # and letters, which adb can type), filled from
           # the app, renamed through the client call. Names carry the run id,
           # so no two gates ever meet each other's family playlists.
-          FAM="#family%sBrama%s$BRAMA_RUN"
           BARE="Brama $BRAMA_RUN"
           search_for Mozart
           open_menu_on_row "$F1_TITLE" || { shot w8-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
@@ -1092,8 +1129,7 @@ jobs:
           tap_text "New playlist" || { shot w8-newplaylist; echo "::error::The New playlist action could not be tapped."; exit 1; }
           await_text "Playlist name" 10 \
             || { shot w8-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
-          tap_edit 0
-          type "$FAM"
+          type_into 0 "#family Brama $BRAMA_RUN" w8-family-name
           adb shell input keyevent 111
           adb shell input keyevent 61
           # The dialog relayouts once the keyboard is gone, and Create can end
@@ -1104,8 +1140,12 @@ jobs:
             dump create-check >/dev/null
             cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
             if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
-            adb shell input swipe 540 600 540 1800 400
-            sleep 1
+            if [ -n "$(nodes_with "Create" read-onscreen)" ]; then
+              sleep 2   # visible but disabled: the field fills, it wakes
+            else
+              adb shell input swipe 540 600 540 1800 400
+              sleep 1
+            fi
           done
           [ -n "$up" ] || { shot w8-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
           tap_text "Create" || { shot w8-create; echo "::error::The Create button could not be tapped."; exit 1; }
