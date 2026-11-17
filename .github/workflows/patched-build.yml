@@ -572,19 +572,35 @@ jobs:
                           break
           if row is None:
               sys.exit(0)
-          best = None
+          # Two shapes of switch, in order of trust: one standing right of the
+          # row's text (the sign-in form's Legacy row, green since run 12),
+          # then one overlapping the row from the left (a settings row whose
+          # checkable spans the whole row, run 44086226320). Dropping the
+          # first for the second lost Legacy in run 44090556100; the cascade
+          # keeps both.
+          right = None
+          overlap = None
           for node in root.iter("node"):
-              if node.get("checkable") == "true":
-                  m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
-                  if not m:
-                      continue
-                  x1, y1, x2, y2 = map(int, m.groups())
-                  cy = (y1 + y2) // 2
-                  # A settings row's checkable often spans the whole row,
-                  # starting left of the text itself (run 44086226320), so
-                  # any overlap in both axes is the row's switch.
-                  if row[1] - 20 <= cy <= row[3] + 20 and x1 <= row[2] and x2 >= row[0]:
-                      best = (node, ((x1 + x2) // 2, cy))
+              if node.get("checkable") != "true":
+                  continue
+              m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+              if not m:
+                  continue
+              x1, y1, x2, y2 = map(int, m.groups())
+              cy = (y1 + y2) // 2
+              if row[1] - 20 <= cy <= row[3] + 20:
+                  c = (node, ((x1 + x2) // 2, cy))
+                  if x1 > row[0] and right is None:
+                      right = c
+                  if x1 <= row[2] and x2 >= row[0] and overlap is None:
+                      overlap = c
+          best = right or overlap
+          if best:
+              node, (x, y) = best
+              if node.get("checked") == "true":
+                  print("on")
+              else:
+                  print(x, y)
           if best:
               node, (x, y) = best
               if node.get("checked") == "true":
@@ -611,16 +627,31 @@ jobs:
                           break
           if row is None:
               sys.exit(0)
-          best = None
+          # Two shapes of switch, in order of trust: one standing right of the
+          # row's text (the sign-in form's Legacy row, green since run 12),
+          # then one overlapping the row from the left (a settings row whose
+          # checkable spans the whole row, run 44086226320). Dropping the
+          # first for the second lost Legacy in run 44090556100; the cascade
+          # keeps both.
+          right = None
+          overlap = None
           for node in root.iter("node"):
-              if node.get("checkable") == "true":
-                  m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
-                  if not m:
-                      continue
-                  x1, y1, x2, y2 = map(int, m.groups())
-                  cy = (y1 + y2) // 2
-                  if row[1] - 20 <= cy <= row[3] + 20 and x1 <= row[2] and x2 >= row[0]:
-                      best = ((x1 + x2) // 2, cy)
+              if node.get("checkable") != "true":
+                  continue
+              m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+              if not m:
+                  continue
+              x1, y1, x2, y2 = map(int, m.groups())
+              cy = (y1 + y2) // 2
+              if row[1] - 20 <= cy <= row[3] + 20:
+                  c = ((x1 + x2) // 2, cy)
+                  if x1 > row[0] and right is None:
+                      right = c
+                  if x1 <= row[2] and x2 >= row[0] and overlap is None:
+                      overlap = c
+          best = right or overlap
+          if best:
+              print(*best)
           if best:
               print(*best)
           PY
