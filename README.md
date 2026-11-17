@@ -13,6 +13,27 @@
 
 </div>
 
+---
+
+> ### This fork
+>
+> A fork of [winters27/octo-player](https://github.com/winters27/octo-player)
+> that stays as close to upstream as it can: wherever the developer has done
+> it — better, or only begun to — **his code is what runs here**, and the
+> fork's own changes only ever fill a gap upstream has not reached yet; when
+> his version lands, the fork's patch for it retires. That is what happened
+> to this fork's first patch, which put **songs found online into your
+> playlists** on Android before upstream had it: apps 1.13.0 does it natively
+> and better, so the patch is gone. What the fork carries today is its own
+> channel: **a `.patched` build beside the official app**
+> (`app.winters.octo.patched`), signed with its own stable key so one update
+> installs over the last, built and tested by CI on every push, each green
+> build published as an APK on Releases. Upstream's features and defaults
+> are untouched.
+> Details: [CHANGELOG.md](CHANGELOG.md).
+
+---
+
 [Octo](https://github.com/winters27/octo) is a proxy that adds discovery to your Navidrome server and works with any Subsonic app. These are players made to go with it: the music Octo finds sits beside your library, and keeping a song is just **Add to library**.
 
 ![Home](docs/images/desktop-home.webp)
