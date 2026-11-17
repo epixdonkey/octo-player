@@ -554,14 +554,23 @@ jobs:
             done
             return 1
           }
-          # The switch beside a row, flipped only when it is off: "x y" to
-          # tap, or "on" when it already is.
-          switch_on_beside() { # switch_on_beside <row text>
-            dump switch >/dev/null
-            python3 - "$RUNNER_TEMP/brama-dumps/switch.xml" "$1" <<'PY'
+          # Switch reading and flipping, from dumps that belong to the call
+          # alone: every read takes its own fresh dump under its own name
+          # (sw-state-N / sw-flip-N), so no other helper's file can speak
+          # for the switch, and the switch is flipped at most once per look
+          # (run 44098011463: a stale read said "off" after the flip, the
+          # second flip turned it off again, and the step failed its own
+          # doing). The tap lands on the switch's thumb: eighty pixels from
+          # the matched node's right end, on its centre line -- the switch's
+          # own onCheckedChange, where the row's middle proved dead (run
+          # 44094336562).
+          switch_state() { # switch_state <xml-file> <row text> -> "on", "x y", or empty
+            python3 - "$1" "$2" <<'PY'
           import sys, re, xml.etree.ElementTree as ET
           root = ET.parse(sys.argv[1]).getroot()
           want = sys.argv[2]
+          # Two shapes, most trusted first: a checkable right of the text,
+          # then one overlapping the row from the left.
           row = None
           for node in root.iter("node"):
               for value in (node.get("text"), node.get("content-desc")):
@@ -572,12 +581,6 @@ jobs:
                           break
           if row is None:
               sys.exit(0)
-          # Two shapes of switch, in order of trust: one standing right of the
-          # row's text (the sign-in form's Legacy row, green since run 12),
-          # then one overlapping the row from the left (a settings row whose
-          # checkable spans the whole row, run 44086226320). Dropping the
-          # first for the second lost Legacy in run 44090556100; the cascade
-          # keeps both.
           right = None
           overlap = None
           for node in root.iter("node"):
@@ -589,10 +592,6 @@ jobs:
               x1, y1, x2, y2 = map(int, m.groups())
               cy = (y1 + y2) // 2
               if row[1] - 20 <= cy <= row[3] + 20:
-                  # Tap the switch itself, not the row's middle: the row is
-                  # toggleable, but the switch's own onCheckedChange is the
-                  # sure hand (run 44094336562: the row's centre changed
-                  # nothing), and it lives on the right, by the row's end.
                   c = (node, (x2 - 80, cy))
                   if x1 > row[0] and right is None:
                       right = c
@@ -605,67 +604,36 @@ jobs:
                   print("on")
               else:
                   print(x, y)
-          if best:
-              node, (x, y) = best
-              if node.get("checked") == "true":
-                  print("on")
-              else:
-                  print(x, y)
           PY
           }
-          # The switch beside a row of settings text: the nearest checkable
-          # node on the row's own height.
-          toggle_beside() { # toggle_beside <row text>
-            dump switch >/dev/null
-            local xy; xy="$(python3 - "$RUNNER_TEMP/brama-dumps/switch.xml" "$1" <<'PY'
-          import sys, re, xml.etree.ElementTree as ET
-          root = ET.parse(sys.argv[1]).getroot()
-          want = sys.argv[2]
-          row = None
-          for node in root.iter("node"):
-              for value in (node.get("text"), node.get("content-desc")):
-                  if value and want in value:
-                      m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
-                      if m:
-                          row = tuple(map(int, m.groups()))
-                          break
-          if row is None:
-              sys.exit(0)
-          # Two shapes of switch, in order of trust: one standing right of the
-          # row's text (the sign-in form's Legacy row, green since run 12),
-          # then one overlapping the row from the left (a settings row whose
-          # checkable spans the whole row, run 44086226320). Dropping the
-          # first for the second lost Legacy in run 44090556100; the cascade
-          # keeps both.
-          right = None
-          overlap = None
-          for node in root.iter("node"):
-              if node.get("checkable") != "true":
-                  continue
-              m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
-              if not m:
-                  continue
-              x1, y1, x2, y2 = map(int, m.groups())
-              cy = (y1 + y2) // 2
-              if row[1] - 20 <= cy <= row[3] + 20:
-                  # Tap the switch itself, not the row's middle: the row is
-                  # toggleable, but the switch's own onCheckedChange is the
-                  # sure hand (run 44094336562: the row's centre changed
-                  # nothing), and it lives on the right, by the row's end.
-                  c = (x2 - 80, cy)
-                  if x1 > row[0] and right is None:
-                      right = c
-                  if x1 <= row[2] and x2 >= row[0] and overlap is None:
-                      overlap = c
-          best = right or overlap
-          if best:
-              print(*best)
-          if best:
-              print(*best)
-          PY
-          )"
-            [ -n "$xy" ] && adb shell input tap $xy && return 0
-            return 1
+          switch_on_beside() { # switch_on_beside <row text> -> "on" (flipped once if off), "fail", or empty (row nowhere)
+            local want="$1" i st
+            for i in 1 2 3; do
+              dump "sw-state-$i" >/dev/null
+              st="$(switch_state "$RUNNER_TEMP/brama-dumps/sw-state-$i.xml" "$want")"
+              [ -n "$st" ] || { echo ""; return 0; }
+              if [ "$st" = "on" ]; then echo "on"; return 0; fi
+              adb shell input tap $st
+              sleep 2
+              dump "sw-flip-$i" >/dev/null
+              st="$(switch_state "$RUNNER_TEMP/brama-dumps/sw-flip-$i.xml" "$want")"
+              [ "$st" = "on" ] && { echo "on"; return 0; }
+            done
+            echo "fail"
+          }
+          # The sign-in form's Legacy row: flip it on, once, proven from
+          # dumps of its own.
+          toggle_beside() { # toggle_beside <row text> -> 0 when the switch is on (flipping once if off)
+            local want="$1" st
+            dump tgl-state >/dev/null
+            st="$(switch_state "$RUNNER_TEMP/brama-dumps/tgl-state.xml" "$want")"
+            [ -n "$st" ] || return 1
+            [ "$st" = "on" ] && return 0
+            adb shell input tap $st
+            sleep 2
+            dump tgl-flip >/dev/null
+            st="$(switch_state "$RUNNER_TEMP/brama-dumps/tgl-flip.xml" "$want")"
+            [ "$st" = "on" ]
           }
           # The lowest clickable node on screen: the now playing bar, when
           # nothing else names it.
@@ -941,13 +909,18 @@ jobs:
           sleep 2
           await_text "Save new playlists to the server" 15 scroll \
             || { shot s-no-playlists-switch; echo "::error::The server page never listed the playlists switch."; exit 1; }
+          # The helper flips at most once per look and proves the state from
+          # its own dumps; this step only reads the answer (run 44098011463:
+          # the step's own second flip undid the first).
           sw="$(switch_on_beside "Save new playlists to the server")"
-          [ -n "$sw" ] || { shot s-playlists-switch; echo "::error::The Save new playlists to the server switch was not found."; exit 1; }
-          if [ "$sw" != "on" ]; then
-            adb shell input tap $sw || { shot s-playlists-switch; echo "::error::The playlists switch could not be flipped."; exit 1; }
-            sleep 2
-            sw="$(switch_on_beside "Save new playlists to the server")"
-            [ "$sw" = "on" ] || { shot s-playlists-switch; echo "::error::The playlists switch never turned on."; exit 1; }
+          if [ "$sw" = "fail" ]; then
+            shot s-playlists-switch
+            echo "::error::The playlists switch never turned on."
+            exit 1
+          elif [ -z "$sw" ]; then
+            shot s-playlists-switch
+            echo "::error::The Save new playlists to the server switch was not found."
+            exit 1
           fi
           shot s-playlists-switch-on
           check S "new playlists will be made on the server" "on" "${sw:-none}"
