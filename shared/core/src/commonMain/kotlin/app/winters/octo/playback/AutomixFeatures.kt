@@ -157,7 +157,8 @@ data class SectionFeatures(
     val boundariesMs: List<Long>,
     val tempo: Tempo?,
     // Where the song first comes within 6 dB of its body level: the end of a
-    // quiet intro, or the sound start when it starts at full level.
+    // quiet intro, or the sound start when it starts at full level. A head
+    // whose sound never gets there has its intro end at the head's end.
     val introEndMs: Long? = null,
 )
 
@@ -190,6 +191,17 @@ class SectionAnalysis private constructor(
         return at.toDouble() / (to - from)
     }
 
+    // How long from fromMs to toMs the 400 ms level is at or above
+    // thresholdDb, in milliseconds.
+    fun msAtLeast(fromMs: Double, toMs: Double, thresholdDb: Double): Double =
+        if (toMs <= fromMs) 0.0 else shareAtLeast(fromMs, toMs, thresholdDb) * (toMs - fromMs)
+
+    // The 400 ms level at a moment in dBFS; SILENT_DB outside the envelope.
+    fun levelAt(ms: Double): Double {
+        val i = envelope.indexAt(ms)
+        return if (i < 0 || i >= envelope.size) SILENT_DB.toDouble() else body[i]
+    }
+
     // The same section measured against a body level known from elsewhere,
     // such as the whole song heard as it played: the gate, sound times,
     // outro and intro move with it; the boundaries and tempo stay.
@@ -208,6 +220,15 @@ class SectionAnalysis private constructor(
             prefix, body, sound, outro,
         )
     }
+
+    // The same section with its quiet intro running to the section's end
+    // when the sound starts but never comes near the body inside it.
+    internal fun withIntroToTheEnd(): SectionAnalysis =
+        if (features.soundStartMs == null || features.introEndMs != null) {
+            this
+        } else {
+            SectionAnalysis(envelope, features.copy(introEndMs = envelope.endMs), prefix, body, sound, outro)
+        }
 
     companion object {
         // An envelope with features found elsewhere, such as a server that
@@ -259,9 +280,18 @@ class SectionAnalysis private constructor(
     }
 }
 
-// The features of the start of a song.
-fun analyzeHead(envelope: SectionEnvelope, tagBpm: Double? = null): SectionAnalysis =
-    SectionAnalysis.of(envelope, tagBpm, bodyPercentile = HEAD_BODY_PERCENTILE)
+// How much of the start of a song its head covers: as much as a scout
+// reads and a profile holds.
+const val AUTOMIX_HEAD_MS = 45_000L
+
+// The features of the start of a song. `bodyLevelDb`, the whole song's body
+// level when it is known (a profile made from the whole song), stands in
+// for the start's own; a scouted start measures its own. When the sound
+// starts but never comes within OUTRO_BELOW_BODY_DB of the body inside the
+// section, the quiet intro lasts at least that long, so it ends at the
+// section's end.
+fun analyzeHead(envelope: SectionEnvelope, tagBpm: Double? = null, bodyLevelDb: Double? = null): SectionAnalysis =
+    SectionAnalysis.of(envelope, tagBpm, bodyLevelDb, HEAD_BODY_PERCENTILE).withIntroToTheEnd()
 
 // The features of the end of a song. Without a body level from the whole
 // song, the tail's own upper level stands in for it.

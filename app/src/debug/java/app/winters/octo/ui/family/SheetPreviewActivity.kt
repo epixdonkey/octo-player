@@ -28,6 +28,7 @@ import app.winters.octo.design.OctoTheme
 import app.winters.octo.design.OctoType
 import app.winters.octo.server.PasswordChange
 import app.winters.octo.subsonic.FamilyLinkChoices
+import kotlinx.coroutines.flow.MutableStateFlow
 import app.winters.octo.subsonic.FamilyLogin
 import app.winters.octo.subsonic.FamilySignInPending
 import app.winters.octo.subsonic.FamilySignInStart
@@ -53,7 +54,7 @@ class SheetPreviewActivity : ComponentActivity() {
             servers = FamilyLinkChoices("https://music.example.com", "http://192.168.1.20:4533"),
         )
         val sheet = when (state) {
-            "sent" -> HandOverSheet(id = 1, start = start, key = key, done = "Sent to Studio PC. It's signing in now.")
+            "sent" -> HandOverSheet(id = 1, start = start, key = key, done = "Sent to Studio PC.")
             "stale" -> HandOverSheet(id = 1, start = start.copy(expires = Instant.now().minusSeconds(5).toString()), key = key, stale = true)
             "unavailable" -> HandOverSheet(id = 1, start = start.copy(links = FamilyLinkChoices(null, "http://192.168.1.20:4533/family/signin"), servers = FamilyLinkChoices(null, "http://192.168.1.20:4533"), anywhereAvailable = false), key = key)
             "loading" -> HandOverSheet(id = 1, key = key, loading = true)
@@ -88,7 +89,7 @@ class SheetPreviewActivity : ComponentActivity() {
                                 when (state) {
                                     "invite", "reset" -> InviteSheetContent(invite, "https://music.example.com", owner = true, newLink = {}, actions = actions)
                                     "asking" -> AskingContent(FamilySignInPending("r_1", "Studio PC", "Windows"), sending = false, allow = ::finish, deny = ::finish)
-                                    "password" -> PasswordSheetContent({ _, _ -> PasswordChange.Changed }, done = { finish() }, close = ::finish)
+                                    "password" -> PasswordSheetContent(MutableStateFlow(false), { _, _, answered -> answered(PasswordChange.Changed, "") }, close = ::finish)
                                     else -> HandOverSheetContent(sheet, awayAllowed = true, server = "https://music.example.com", avatarName = "Alex", owner = true, actions = actions)
                                 }
                             }

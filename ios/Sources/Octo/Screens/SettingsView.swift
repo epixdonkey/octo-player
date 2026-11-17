@@ -25,7 +25,7 @@ struct SettingsView: View {
                 accountCard
                 searchField
                 if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    results(searchSettings(query))
+                    results(searchSettings(query, in: SettingsIndex.searchable(updaterOn: AppUpdates.shared.state.off == nil)))
                 } else {
                     categories
                 }
@@ -77,26 +77,29 @@ struct SettingsView: View {
     @ViewBuilder
     private var serverRow: some View {
         if let active = session.active, session.client != nil {
-            let problem = feeds.syncProblem
+            // A copy under way says how far it is over an older problem.
+            let run = feeds.copyRun.flatMap { $0.account == active.id ? $0 : nil }
+            let problem = run == nil ? feeds.syncProblem : nil
             let status = problem ?? SettingsSummaries.serverStatus(
                 syncing: feeds.syncing,
                 place: active.homeAddress == nil ? nil : (session.atHome ? .home : .away),
                 syncedAt: syncedAt(active.id),
-                now: now
+                now: now,
+                run: run
             )
             AccountRow(icon: SettingsIcon.cloud, title: active.name, lines: [
-                (active.username.isEmpty ? "Signed in with a key" : active.username, OctoColor.textSecondary),
-                (status, problem != nil ? OctoColor.error : OctoColor.textMuted),
+                (active.username.isEmpty ? "Signed in with a key" : active.username, AnyShapeStyle(OctoColor.textSecondary)),
+                (status, problem != nil ? AnyShapeStyle(OctoColor.error) : AnyShapeStyle(OctoColor.textMuted)),
             ]) { label in NavigationLink(value: SettingsRoute(.server)) { label } }
         } else if session.servers.isEmpty {
             AccountRow(icon: SettingsIcon.cloud, title: "Connect a music server",
-                       lines: [("Add the music on your own server", OctoColor.textMuted)]) { label in
+                       lines: [("Add the music on your own server", AnyShapeStyle(OctoColor.textMuted))]) { label in
                 Button { router.signIn = .signIn } label: { label }
             }
         } else {
             // Servers are kept, none in use: the list is where to go.
             AccountRow(icon: SettingsIcon.cloud, title: "Your servers",
-                       lines: [("Signed out. Sign in to one, or add another.", OctoColor.textMuted)]) { label in
+                       lines: [("Signed out. Sign in to one, or add another.", AnyShapeStyle(OctoColor.textMuted))]) { label in
                 NavigationLink(value: SettingsRoute(.server)) { label }
             }
         }
@@ -131,7 +134,8 @@ struct SettingsView: View {
         let player = settings.player
         let serverLine: String = {
             guard let active = session.active, session.client != nil else { return "Not connected" }
-            return SettingsSummaries.serverStatus(syncing: feeds.syncing, place: nil, syncedAt: syncedAt(active.id), now: now)
+            return SettingsSummaries.serverStatus(syncing: feeds.syncing, place: nil, syncedAt: syncedAt(active.id), now: now,
+                                                  run: feeds.copyRun.flatMap { $0.account == active.id ? $0 : nil })
         }()
         return VStack(spacing: 20) {
             SettingsGroup(title: "Listening", inset: iconRowInset) {
@@ -213,10 +217,10 @@ final class SettingsClock {
 private struct AccountRow<Wrapped: View>: View {
     let icon: String
     let title: String
-    let lines: [(String, Color)]
+    let lines: [(String, AnyShapeStyle)]
     let wrap: (AnyView) -> Wrapped
 
-    init(icon: String, title: String, lines: [(String, Color)], @ViewBuilder wrap: @escaping (AnyView) -> Wrapped) {
+    init(icon: String, title: String, lines: [(String, AnyShapeStyle)], @ViewBuilder wrap: @escaping (AnyView) -> Wrapped) {
         self.icon = icon
         self.title = title
         self.lines = lines
@@ -287,7 +291,7 @@ struct SettingsSearchField: View {
         .frame(height: 48)
         .background(OctoColor.accent.opacity(on ? 0.15 : 0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(OctoColor.accent.opacity(on ? 0.6 : 0.1), lineWidth: on ? 1.5 : 1))
-        .glassEffect(Glass.octo, in: .rect(cornerRadius: 12))
+        .octoGlass(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .animation(.easeOut(duration: 0.2), value: on)
     }
 }

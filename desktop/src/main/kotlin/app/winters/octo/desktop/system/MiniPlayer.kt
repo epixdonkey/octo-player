@@ -73,6 +73,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.rememberWindowState
 import app.winters.octo.design.ChromeEdge
+import app.winters.octo.design.WarmCrispIcons
 import androidx.compose.foundation.lazy.rememberLazyListState
 import app.winters.octo.design.scrollbar
 import app.winters.octo.design.ControlHeight
@@ -125,6 +126,7 @@ import app.winters.octo.desktop.window.screenAreas
 import app.winters.octo.player.immersive.WashTuning
 import app.winters.octo.desktop.player.wash.WashCover
 import app.winters.octo.desktop.ui.OctoArt
+import app.winters.octo.desktop.ui.OverArtWindow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
@@ -286,6 +288,7 @@ fun MiniPlayerWindow(
     ) {
         // Colour text needs a window drawn whole; a see-through one stays grey.
         remember { useTextPixels(window, if (systemRounds) appTextPixels else null) }
+        WarmCrispIcons()
         val frame = remember { Frame(window, windowState) }
         density = LocalDensity.current.density
         LaunchedEffect(Unit) {
@@ -313,19 +316,21 @@ fun MiniPlayerWindow(
                     if (position is WindowPosition.Absolute) onMoved(WindowSpot(position.x.value, position.y.value, size.width.value, size.height.value))
                 }
         }
-        ProvideWindowLook(reduceMotion = reduceMotion, focus = keyboard) {
-            CompositionLocalProvider(LocalCovers provides app.connection?.client) {
-                Box(Modifier.fillMaxSize()) {
-                    MiniPlayerView(
-                        app,
-                        panel = prefs.miniPlayerPanel.toMiniPanel(),
-                        pinned = prefs.miniPlayerPinned,
-                        actions = actions,
-                        note = pinNote,
-                        shape = if (systemRounds) RectangleShape else MenuShape,
-                        dragArea = { modifier -> if (!prefs.miniPlayerPinned) WindowDraggableArea(modifier) {} },
-                    )
-                    if (!prefs.miniPlayerPinned) ResizeEdges(frame, thickness = Space.Xs)
+        OverArtWindow(app) {
+            ProvideWindowLook(reduceMotion = reduceMotion, focus = keyboard) {
+                CompositionLocalProvider(LocalCovers provides app.connection?.client) {
+                    Box(Modifier.fillMaxSize()) {
+                        MiniPlayerView(
+                            app,
+                            panel = prefs.miniPlayerPanel.toMiniPanel(),
+                            pinned = prefs.miniPlayerPinned,
+                            actions = actions,
+                            note = pinNote,
+                            shape = if (systemRounds) RectangleShape else MenuShape,
+                            dragArea = { modifier -> if (!prefs.miniPlayerPinned) WindowDraggableArea(modifier) {} },
+                        )
+                        if (!prefs.miniPlayerPinned) ResizeEdges(frame, thickness = Space.Xs)
+                    }
                 }
             }
         }
@@ -564,7 +569,7 @@ private fun Transport(app: AppState, state: PlayerState) {
     state.live?.let { live -> return LiveTransport(app, state, live, playSize = PlayTarget, stepSize = ControlHeight.S, stepIcon = IconSize.Toolbar, tint = OctoColors.TextPrimary, gap = Space.Xxs) }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.Xxs)) {
         IconAction(OctoIcons.Previous, "Previous", app.player::previous, size = ControlHeight.S, iconSize = IconSize.Toolbar, enabled = song != null)
-        PlayButton(state.playing, enabled = song != null, size = PlayTarget, glyph = IconSize.Toolbar * PlayScale, waiting = state.buffering) { app.player.togglePlay() }
+        PlayButton(state.playing, enabled = song != null, size = PlayTarget, glyph = IconSize.Toolbar * PlayScale, waiting = state.buffering, exact = true) { app.player.togglePlay() }
         IconAction(OctoIcons.Next, "Next", app.player::next, size = ControlHeight.S, iconSize = IconSize.Toolbar, enabled = song != null)
     }
 }

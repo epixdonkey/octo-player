@@ -157,6 +157,17 @@ class SweptFilter(private val kind: FilterKind, private val sampleRate: Int, pri
         y2.fill(0.0)
         hz = -1.0
     }
+
+    // Takes over everything `other` holds, so a stretch runs again from the
+    // same state. Both must be built alike.
+    fun copyFrom(other: SweptFilter) {
+        other.k.copyInto(k)
+        other.x1.copyInto(x1)
+        other.x2.copyInto(x2)
+        other.y1.copyInto(y1)
+        other.y2.copyInto(y2)
+        hz = other.hz
+    }
 }
 
 // Runs a deck's part of a transition on its sound: the volume curve with
@@ -184,12 +195,66 @@ class TransitionShaper(val sampleRate: Int, val channels: Int) {
     private var quietMs = 0.0
     private var faded = false
 
+    // A disarm in progress: the volume and the filters' share go straight
+    // to the song's own over the frames left.
+    private var disarmLeft = 0
+    private var gainStep = 0.0
+    private var wetStep = 0.0
+
+    // The volume applied to the last frame, for checks.
+    val level: Double get() = gain
+
+    // Whether a transition or what is left of one still changes the sound.
+    val shaping: Boolean get() = current != null || gain != 1.0 || wet != 0.0
+
+    // Takes over everything `other` holds (filters, volume, the early-fade
+    // gate and the transition it runs), so a stretch can be shaped again
+    // from the same state. Both must be built alike.
+    fun copyFrom(other: TransitionShaper) {
+        require(other.sampleRate == sampleRate && other.channels == channels) { "shapers built differently" }
+        lowPass.copyFrom(other.lowPass)
+        highPass.copyFrom(other.highPass)
+        current = other.current
+        gain = other.gain
+        wet = other.wet
+        lowPassOn = other.lowPassOn
+        levelSquares = other.levelSquares
+        levelCount = other.levelCount
+        quietMs = other.quietMs
+        faded = other.faded
+        disarmLeft = other.disarmLeft
+        gainStep = other.gainStep
+        wetStep = other.wetStep
+    }
+
+    // Drops the transition and takes the sound to the song's own volume
+    // and no filtering in a straight line over `frames`, from wherever the
+    // transition left it (the filters run on with their last cutoffs while
+    // they fade out, so nothing restarts). 0 goes there at once.
+    fun disarm(frames: Long) {
+        current = null
+        faded = false
+        if (frames <= 0 || (gain == 1.0 && wet == 0.0)) {
+            gain = 1.0
+            wet = 0.0
+            disarmLeft = 0
+            lowPass.reset()
+            highPass.reset()
+            lowPassOn = false
+            return
+        }
+        disarmLeft = frames.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        gainStep = (1.0 - gain) / disarmLeft
+        wetStep = wet / disarmLeft
+    }
+
     // Takes up a transition, or drops it with null. An incoming song armed
     // fresh takes its first volume at once, so it starts silent instead of
     // fading down. An outgoing song is audible already, so a transition
     // armed after its start glides to the curve instead of jumping.
     fun arm(transition: DeckTransition?, songMs: Double) {
         if (transition === current) return
+        disarmLeft = 0
         val fresh = current == null && gain == 1.0
         current = transition
         faded = false
@@ -202,6 +267,10 @@ class TransitionShaper(val sampleRate: Int, val channels: Int) {
     // Changes `frames` frames of `samples` in place. The first frame is at
     // `songMs` in its song and each frame moves the song on `msPerFrame`.
     fun process(samples: FloatArray, frames: Int, songMs: Double, msPerFrame: Double) {
+        if (disarmLeft > 0) {
+            disarming(samples, frames)
+            return
+        }
         val transition = current
         if (gain == 1.0 && wet == 0.0) {
             if (transition == null) return
@@ -222,7 +291,7 @@ class TransitionShaper(val sampleRate: Int, val channels: Int) {
                 highPass.setCutoff(transition.highPassAt(t!!))
             }
             if (transition != null && t != null && !transition.incoming && transition.gateDb != null) {
-                watchSilence(samples, frame, count, t, transition.gateDb)
+                watchSilence(samples, frame, count, t, transition.gateDb, transition.plan.holdShare)
             }
             if (faded) target = 0.0
             val wetTarget = if (filtersOn) 1.0 else 0.0
@@ -255,11 +324,51 @@ class TransitionShaper(val sampleRate: Int, val channels: Int) {
         }
     }
 
+    private fun disarming(samples: FloatArray, frames: Int) {
+        for (i in 0 until frames) {
+            if (disarmLeft > 0) {
+                disarmLeft--
+                if (disarmLeft == 0) {
+                    gain = 1.0
+                    wet = 0.0
+                } else {
+                    gain += gainStep
+                    wet -= wetStep
+                }
+            }
+            val g = gain
+            val base = i * channels
+            for (ch in 0 until channels) {
+                val x = samples[base + ch].toDouble()
+                var y = x
+                if (wet > 0) {
+                    var f = highPass.process(x, ch)
+                    if (lowPassOn) f = lowPass.process(f, ch)
+                    y = x + (f - x) * wet
+                }
+                samples[base + ch] = (y * g).toFloat()
+            }
+        }
+        if (disarmLeft == 0) {
+            lowPass.reset()
+            highPass.reset()
+            lowPassOn = false
+        }
+    }
+
     // Measures the outgoing song in 10 ms steps through the blend, before
     // any volume change, and fades it out once it has stayed below its gate
-    // for EARLY_FADE_MS.
-    private fun watchSilence(samples: FloatArray, from: Int, count: Int, t: Double, gateDb: Double) {
+    // for EARLY_FADE_MS. Through a hold (an intro's, or the incoming song's
+    // silent lead-in) the outgoing song plays at its own level, so the gate
+    // listens only from the hold's end, counting from nothing there.
+    private fun watchSilence(samples: FloatArray, from: Int, count: Int, t: Double, gateDb: Double, holdShare: Double) {
         if (faded || t < 0 || t >= 1) return
+        if (holdShare > 0 && t < holdShare) {
+            quietMs = 0.0
+            levelSquares = 0.0
+            levelCount = 0
+            return
+        }
         for (i in 0 until count) {
             val base = (from + i) * channels
             var sum = 0.0

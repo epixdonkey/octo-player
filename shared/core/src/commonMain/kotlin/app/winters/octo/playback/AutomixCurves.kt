@@ -6,6 +6,7 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 // The curve weight of each kind of transition: how much of the S-shaped
@@ -59,6 +60,44 @@ fun automixOutGain(t: Double, k: Double): Double {
 fun automixInGain(t: Double, k: Double): Double {
     val out = automixOutGain(t, k)
     return sqrt(max(0.0, 1 - out * out))
+}
+
+// Where a blend whose start is held is along its curve at `t` (0 to 1): the
+// outgoing song alone at its own level until `holdShare`, while the
+// incoming one's first sound is still to come, then the curve over the
+// rest of the overlap. Below 0 while held, where every curve gives the
+// outgoing song 1 and the incoming one 0.
+fun pastHold(t: Double, holdShare: Double): Double = when {
+    holdShare <= 0 -> t
+    holdShare >= 1 -> -1.0
+    else -> (t - holdShare) / (1 - holdShare)
+}
+
+// The outgoing song's volume at `t` through an intro (0 to 1): full until
+// `holdShare`, then an equal-power fade to nothing at the end.
+fun introOutGain(t: Double, holdShare: Double): Double {
+    val p = t.coerceIn(0.0, 1.0)
+    val hold = holdShare.coerceIn(0.0, 1.0)
+    if (p <= hold) return 1.0
+    return cos((p - hold) / (1 - hold) * PI / 2).coerceIn(0.0, 1.0)
+}
+
+// The incoming song's volume through an intro: rising as sin(pi/2 * t /
+// rise) to `level` by `rise` (riseShare, ending by `holdShare` at the
+// latest), then `level` until `holdShare`, so its quiet start plays under
+// the outgoing song at that much of its own level; past the hold it comes
+// up as the outgoing song's power leaves, sqrt(level^2 + (1 - level^2) *
+// (1 - out^2)) with `out` the outgoing song's introOutGain, to its own
+// level at the end. At level 1 it is full from the rise's end on.
+fun introInGain(t: Double, riseShare: Double, holdShare: Double, level: Double): Double {
+    val p = t.coerceIn(0.0, 1.0)
+    val hold = holdShare.coerceIn(0.0, 1.0)
+    val rise = riseShare.coerceIn(0.0, 1.0).coerceAtMost(hold)
+    val g = level.coerceIn(0.0, 1.0)
+    if (p < rise) return (sin(PI / 2 * p / rise) * g).coerceIn(0.0, 1.0)
+    if (p <= hold) return g
+    val out = introOutGain(p, holdShare)
+    return sqrt(g * g + (1 - g * g) * (1 - out * out))
 }
 
 // Moves from `from` to `to` on a log scale as u goes from 0 to 1.

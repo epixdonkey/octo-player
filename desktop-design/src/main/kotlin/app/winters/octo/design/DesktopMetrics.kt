@@ -49,12 +49,24 @@ object RowHeight {
     val Nav = 36.dp
 }
 
-// Icon sizes: beside words, in a table, in a toolbar, in the transport.
+// Icon sizes: beside words, in a table, in a toolbar, in the transport;
+// a tick inside a small label, the full player's actions beside the
+// song, a large mark at the head of a dialog, and the full player's
+// previous and next (also the bar's play sign, half again its transport).
+// Icons drawn at one of these sizes sit on whole pixels below 2x; any
+// other size is drawn exactly as its file says.
 object IconSize {
     val Inline = 14.dp
     val Table = 16.dp
     val Toolbar = 18.dp
     val Transport = 20.dp
+    val Mark = 13.dp
+    val Prominent = 22.dp
+    val Feature = 28.dp
+    val Lead = 30.dp
+
+    // Every size above: the only ones an icon is fitted to pixels at.
+    val Fitted = listOf(Mark, Inline, Table, Toolbar, Transport, Prominent, Feature, Lead)
 }
 
 // The keyboard's mark: the ring round what has the keyboard, a hairline of
@@ -222,11 +234,21 @@ object SettingsSize {
     val CurvePreviewWidth = 28.dp
     val CurvePreviewHeight = 16.dp
     val CurveLine = 1.5.dp
-    // The tile behind a section's icon at the top of its page.
-    val SectionIcon = 36.dp
+    // A picture choice: its picture's height, and the ring round the chosen one.
+    val PictureThumb = 78.dp
+    val PictureRing = 2.dp
+    // The handle a Home shelf is dragged by: its two lines' height and weight.
+    val HandleLines = 7.dp
+    val HandleStroke = 2.dp
 
     // A small form over Settings: adding a server, a new password, and how
     // tall it grows before it scrolls.
     val Sheet = 460.dp
     val SheetMax = 720.dp
+
+    // How far the sidebar and Settings' list slide as they trade places.
+    val SwapShift = 36.dp
+
+    // The account card's cover mosaic at the top of Settings' list.
+    val AccountArt = 40.dp
 }

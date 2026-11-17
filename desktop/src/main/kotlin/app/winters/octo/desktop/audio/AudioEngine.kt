@@ -1,6 +1,7 @@
 package app.winters.octo.desktop.audio
 
 import app.winters.octo.audio.AutomixSettings
+import app.winters.octo.audio.ClientCertificate
 import app.winters.octo.audio.DspSettings
 import app.winters.octo.audio.Engine
 import app.winters.octo.audio.EngineEvent
@@ -92,10 +93,16 @@ interface AudioEngine : AutoCloseable {
     // Sends a Position event this often while playing; 0 for none.
     fun setPositionInterval(ms: Int)
 
-    // The certificates the listener trusted, as SHA-256 fingerprints by
-    // host, so songs stream from the servers the app itself may reach.
+    // The certificates the listener trusted, as pins by host (a key's or,
+    // kept from before, a whole certificate's SHA-256), so songs stream from
+    // the servers the app itself may reach.
     // Replaces the ones given before.
     fun setTrustedCertificates(pins: Map<String, String>)
+
+    // The client certificate offered to the server's own origins from the
+    // next connection on, or none with null. One the engine cannot present
+    // throws EngineException, and none is offered then.
+    fun setClientCertificate(certificate: ClientCertificate?)
 }
 
 // The Rust engine behind the interface. Every call returns at once; the
@@ -194,6 +201,8 @@ class NativeAudioEngine(private val engine: Engine) : AudioEngine {
     override fun setTrustedCertificates(pins: Map<String, String>) = ifOpen(Unit) {
         engine.setTrustedCertificates(pins.map { (host, fingerprint) -> TrustedCertificate(host, fingerprint) })
     }
+
+    override fun setClientCertificate(certificate: ClientCertificate?) = ifOpen(Unit) { engine.setClientCertificate(certificate) }
 
     override fun close() {
         if (closed) return

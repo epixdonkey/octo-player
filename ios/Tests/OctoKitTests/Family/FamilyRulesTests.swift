@@ -73,6 +73,37 @@ import Testing
         #expect(open.storageLine == nil)
     }
 
+    /// Music goes to the shared library: no "Your library, x of N GB", no meter and no full
+    /// warning, even with a limit kept for later; the plan and a manager's list say where the
+    /// songs go. Own keeps the library row. The same as the phone and desktop (FamilyRulesTest).
+    @Test func musicThatGoesToTheSharedLibraryShowsNoStorage() {
+        var shared = member(add: .direct, storageUsed: 60_000_000_000, storageLimit: 50)
+        shared.abilities.musicGoesTo = "Shared"
+        #expect(libraryRow(shared) == LibraryRow(title: "Your songs go to the shared library", value: nil, share: nil))
+        #expect(requestSheet(shared).storageLine == nil)
+        let lines = abilityLines(shared.abilities).map(\.text)
+        #expect(lines.first == "Songs you add go straight into the shared library")
+        #expect(!lines.contains { $0.contains("your library") })
+        let own = libraryRow(member(storageUsed: 5_400_000_000, storageLimit: 10))
+        #expect(own.title == "Your library" && own.value == "5.4 of 10 GB used")
+        var listed = FamilyMember(username: "ria")
+        listed.storageUsedBytes = 5_400_000_000
+        listed.storageLimitGb = 10
+        #expect(memberStorageLine(listed) == "5.4 of 10 GB used")
+        listed.musicGoesTo = "Shared"
+        #expect(memberStorageLine(listed) == "Adds to the shared library")
+    }
+
+    /// Older servers send no musicGoesTo, and a name this app doesn't know reads as the member's
+    /// own library.
+    @Test func musicGoesToReadsLeniently() throws {
+        let decoder = JSONDecoder()
+        #expect(!(try decoder.decode(FamilyAbilities.self, from: Data("{}".utf8))).musicGoesToShared)
+        #expect(try decoder.decode(FamilyAbilities.self, from: Data(#"{"musicGoesTo":"Shared"}"#.utf8)).musicGoesToShared)
+        #expect(!(try decoder.decode(FamilyAbilities.self, from: Data(#"{"musicGoesTo":"Elsewhere"}"#.utf8))).musicGoesToShared)
+        #expect(try decoder.decode(FamilyMember.self, from: Data(#"{"username":"ria","musicGoesTo":"Shared"}"#.utf8)).musicGoesToShared)
+    }
+
     @Test func sizesAndCountsReadPlainly() {
         #expect(storageLine(usedBytes: 5_400_000_000, limitGb: 10) == "5.4 of 10 GB used")
         #expect(storageLine(usedBytes: 5_400_000_000, limitGb: 0) == "5.4 GB used")
@@ -151,7 +182,7 @@ import Testing
     @Test func anInviteSignsUpWithTheChosenPassword() async {
         let fake = FamilyFake()
         fake.raw("join") { _ in #"{"username":"alex"}"# }
-        let joined = await joinWithInvite(address: fake.url, token: "tok_1", displayName: "Alex", password: "long enough", session: FakeServer.session)
+        let joined = await joinWithInvite(client: fake.server.joinClient(), token: "tok_1", displayName: "Alex", password: "long enough")
         #expect(joined == .signedUp(username: "alex", password: "long enough", at: fake.url))
         #expect(!joined.description.contains("long enough"))
         let body = fake.called("join").first?.text ?? ""
@@ -163,16 +194,16 @@ import Testing
     @Test func aUsedInviteSaysSo() async {
         let fake = FamilyFake()
         fake.raw("join") { _ in nil }
-        let refused = await joinWithInvite(address: fake.url, token: "tok_1", displayName: "Alex", password: "long enough", session: FakeServer.session)
+        let refused = await joinWithInvite(client: fake.server.joinClient(), token: "tok_1", displayName: "Alex", password: "long enough")
         #expect(refused == .failed("The server did not take this sign-in for that.", unreachable: false))
         fake.server.route { _ in FakeServer.Reply(status: 410, body: Data()) }
-        #expect(await joinWithInvite(address: fake.url, token: "t", displayName: "A", password: "long enough", session: FakeServer.session)
+        #expect(await joinWithInvite(client: fake.server.joinClient(), token: "t", displayName: "A", password: "long enough")
             == .failed("That invite has been used or has expired. Ask for a new one.", unreachable: false))
         fake.server.route { _ in FakeServer.Reply(status: 404, body: Data(#"{"message":"nope"}"#.utf8)) }
-        #expect(await joinWithInvite(address: fake.url, token: "t", displayName: "A", password: "long enough", session: FakeServer.session)
+        #expect(await joinWithInvite(client: fake.server.joinClient(), token: "t", displayName: "A", password: "long enough")
             == .failed("That server has no family sign-up. Check the address, or update Octo on the server.", unreachable: false))
         fake.server.route { _ in FakeServer.Reply(status: 200, body: Data(#"{"username":" "}"#.utf8)) }
-        #expect(await joinWithInvite(address: fake.url, token: "t", displayName: "A", password: "long enough", session: FakeServer.session)
+        #expect(await joinWithInvite(client: fake.server.joinClient(), token: "t", displayName: "A", password: "long enough")
             == .failed("The server did not answer with a username. Ask for a new invite.", unreachable: false))
     }
 
@@ -181,11 +212,11 @@ import Testing
         home.raw("join") { _ in #"{"username":"alex"}"# }
         let outside = FakeServer()
         outside.close()
-        let joined = await joinWithInvite(address: outside.base, token: "tok_1", displayName: "Alex", password: "long enough",
-                                          session: FakeServer.session, home: home.url)
+        let joined = await joinWithInvite(client: outside.joinClient(home: home.url), token: "tok_1", displayName: "Alex",
+                                          password: "long enough", home: home.url)
         #expect(joined == .signedUp(username: "alex", password: "long enough", at: home.url))
         #expect(home.called("join").count == 1)
-        let alone = await joinWithInvite(address: outside.base, token: "tok_1", displayName: "Alex", password: "long enough", session: FakeServer.session)
+        let alone = await joinWithInvite(client: outside.joinClient(), token: "tok_1", displayName: "Alex", password: "long enough")
         #expect(alone == .failed("Octo can't reach that address. Check it and try again.", unreachable: true))
     }
 

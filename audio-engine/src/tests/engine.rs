@@ -1,7 +1,7 @@
 //! The whole engine, playing through the silent device.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -129,11 +129,22 @@ fn item(id: &str, path: &Path) -> QueueItem {
         duration_ms: None,
         replay_gain: None,
         headers: Vec::new(),
+        secure_headers: Vec::new(),
         genre: None,
         bpm: None,
         live: false,
         hls: false,
     }
+}
+
+// Red when: `HttpHeader`'s `Debug` shows its value again (a queue item's
+// `Debug` then shows its gateway sign-in).
+#[test]
+fn a_queue_items_secure_header_values_never_show_in_debug_output() {
+    let login = crate::api::HttpHeader { name: "Authorization".into(), value: "Basic c2VjcmV0".into() };
+    let song = QueueItem { secure_headers: vec![login], ..item("s", Path::new("")) };
+    let shown = format!("{song:?}");
+    assert!(shown.contains("Authorization") && !shown.contains("c2VjcmV0"), "{shown}");
 }
 
 #[test]
@@ -606,8 +617,8 @@ fn a_stream_waits_for_start_after() {
     let song = flac_bytes(RATE, 2, &noise, &[]);
     // The song arrives as fast as it plays, as on a slow connection.
     let quiet = Behaviour { per_second: Some(song.len() / 4), ..Behaviour::default() };
-    let time_to_start = |start_after: u32| {
-        let server = TestServer::start(song.clone(), quiet.clone());
+    let time_to_start = |start_after: u32, behaviour: &Behaviour| {
+        let server = TestServer::start(song.clone(), behaviour.clone());
         let (engine, events, _) = engine(1.0);
         engine.set_start_after(start_after).unwrap();
         let begun = Instant::now();
@@ -619,9 +630,13 @@ fn a_stream_waits_for_start_after() {
         engine.shutdown();
         took
     };
-    let at_once = time_to_start(0);
-    let waited = time_to_start(2_500);
-    assert!(at_once < Duration::from_millis(2_000), "{at_once:?}");
+    // With no wait it starts on the first second of the song, all the
+    // server sends until it is dropped.
+    let one_second = Behaviour { stall_after: Some(song.len() / 4), ..quiet.clone() };
+    time_to_start(0, &one_second);
+    // With one, it starts only once 2.5 s of the song is in, which takes
+    // that long to arrive.
+    let waited = time_to_start(2_500, &quiet);
     assert!(waited >= Duration::from_millis(2_500), "{waited:?}");
 }
 
@@ -668,6 +683,57 @@ fn a_server_with_a_trusted_certificate_plays() {
     let story = events.story();
     let trusted: Vec<&String> = story.iter().filter(|line| line.contains("trusted")).collect();
     assert_eq!(trusted, ["start trusted", "end trusted Finished"], "{story:?}");
+    engine.shutdown();
+}
+
+// Red when: `set_client_certificate` keeps the old identity on a refusal,
+// or the engine's client never offers the identity it was given.
+#[test]
+fn a_client_certificate_reaches_its_server_and_a_refused_one_leaves_none() {
+    use crate::api::{ClientCertificate, Origin, TrustedCertificate};
+    use crate::error::EngineError;
+    use crate::testing::http_server::{ClientAuthServer, ClientCa, SelfSigned};
+    let certificate = SelfSigned::new(&["127.0.0.1"]);
+    let ca = ClientCa::generate();
+    let client = ca.issue("listener", &rcgen::PKCS_ECDSA_P256_SHA256);
+    let clients = [ca.der.clone()];
+    let song = flac_bytes(RATE, 2, &sine(440.0, RATE, 2, 0, 12_000, 0.3), &[]);
+    let server = ClientAuthServer::start(song, &certificate, Some(&clients), &rustls::version::TLS13);
+    let streamed = |id: &str| QueueItem { source: server.url(), ..item(id, Path::new("")) };
+    let (engine, events, _) = engine(4.0);
+    engine.set_trusted_certificates(vec![TrustedCertificate {
+        host: "127.0.0.1".into(),
+        sha256: certificate.fingerprint(),
+    }]);
+    let origins = vec![Origin { scheme: "https".into(), host: "127.0.0.1".into(), port: server.port() }];
+    let given =
+        ClientCertificate { origins: origins.clone(), chain: client.chain.clone(), key: client.key.clone() };
+    engine.set_client_certificate(Some(given)).unwrap();
+    engine.load(vec![streamed("offered")], 0, 0, true).unwrap();
+    events.wait_for(
+        "offered song's end",
+        Duration::from_secs(10),
+        |e| matches!(e, EngineEvent::TrackEnded { item_id, .. } if item_id == "offered"),
+    );
+    let story = events.story();
+    let offered: Vec<&String> = story.iter().filter(|line| line.contains("offered")).collect();
+    assert_eq!(offered, ["start offered", "end offered Finished"], "{story:?}");
+    let shown = Some(client.chain[0].clone());
+    let leaves: Vec<_> = server.seen().into_iter().map(|seen| seen.leaf).collect();
+    assert!(!leaves.is_empty() && leaves.iter().all(|leaf| *leaf == shown), "{leaves:?}");
+    // A key the engine cannot sign with: refused, and none is offered.
+    let refused = ClientCertificate { origins, chain: client.chain.clone(), key: b"not a key".to_vec() };
+    let err = engine.set_client_certificate(Some(refused)).unwrap_err();
+    assert!(matches!(err, EngineError::Failed { kind: ErrorKind::InvalidArgument, .. }), "{err:?}");
+    let asked = server.seen().len();
+    engine.load(vec![streamed("refused")], 0, 0, true).unwrap();
+    let error = events.wait_for(
+        "refused song's error",
+        Duration::from_secs(10),
+        |e| matches!(e, EngineEvent::Error { item_id: Some(id), .. } if id == "refused"),
+    );
+    assert!(matches!(error, EngineEvent::Error { kind: ErrorKind::Network, .. }), "{error:?}");
+    assert_eq!(server.seen().len(), asked, "a request reached the server with no certificate");
     engine.shutdown();
 }
 
@@ -889,6 +955,7 @@ fn a_smart_plan_starts_early_enters_late_and_cuts_the_outgoing_song() {
             match_tempo: false,
             max_overlap_ms: 8_000,
             fade_curve: crate::automix::FadeCurve::EqualPower,
+            longest_intro_ms: 16_000,
         })
         .unwrap();
     engine.load(vec![item("a", &a), item("b", &b)], 0, 0, true).unwrap();
@@ -919,6 +986,170 @@ fn a_smart_plan_starts_early_enters_late_and_cuts_the_outgoing_song() {
     assert_eq!((next[1] * 32768.0).round() as usize, RATE as usize % 15_000);
 }
 
+// A blend at 9 s over 2 s whose next song comes in at 1.03 times its speed.
+fn matched_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    let len = input.current.duration_ms as i64;
+    let mut plan = crate::automix::TransitionPlan::fixed_crossfade(len, 2_000, "matched plan");
+    (plan.kind, plan.k, plan.start_ms) = (crate::automix::TransitionKind::Blend, 0.4, 9_000);
+    plan.beat_match_rate = Some(1.03);
+    plan
+}
+
+#[test]
+fn a_matched_blend_plays_its_rate_however_soon_the_next_song_ends() {
+    // Song A on the left for 12 s; song B on the right for 4 s, which ends
+    // before its rate has eased back to normal.
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    let a_samples: Vec<i16> = (0..RATE as usize * 12).flat_map(|_| [8_192, 0]).collect();
+    write_wav(&a, RATE, 2, &a_samples);
+    let b_samples: Vec<i16> = (0..RATE as usize * 4).flat_map(|_| [0, 8_192]).collect();
+    write_wav(&b, RATE, 2, &b_samples);
+    let (engine, events, capture, pump) = driven_engine();
+    engine.set_test_planner(Some(matched_plan));
+    engine.set_crossfade(2_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+        .unwrap();
+    // With both songs profiled no scout is waited for: the plan waits only
+    // for B's decoder, and is made before anything is played.
+    engine.set_song_profile("a".into(), Some(profile_of(12_000, 0))).unwrap();
+    engine.set_song_profile("b".into(), Some(profile_of(4_000, 0))).unwrap();
+    engine.load(vec![item("a", &a), item("b", &b)], 0, 0, true).unwrap();
+    let planned = events
+        .wait_for("plan", Duration::from_secs(10), |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    let EngineEvent::TransitionPlanned { start_ms, overlap_ms, reason, .. } = planned else { unreachable!() };
+    assert_eq!((start_ms, overlap_ms), (9_000, 2_000), "{reason}");
+    pump.play_out();
+    events.wait_for("queue end", Duration::from_secs(10), |e| matches!(e, EngineEvent::QueueEnded));
+    engine.shutdown();
+    // B's 4 s go by faster than 4 s: 1.03 times through the blend, then
+    // easing back, so B is heard for about 3.89 s.
+    let out = capture.lock().unwrap().clone();
+    let b_heard = out.chunks_exact(2).filter(|f| f[1] != 0.0).count();
+    assert!((182_000..189_000).contains(&b_heard), "B heard for {b_heard} frames: {reason}");
+    // Decided in time to line B up, so the plan kept its rate.
+    assert!(!reason.contains("late"), "{reason}");
+}
+
+// A blend at 9 s over 2 s whose two songs are heard together for all of it,
+// their beats meeting at its start and `drift` ms apart in song time by
+// its end.
+fn drifting_plan(input: &crate::automix::PlanInput, drift: f64) -> crate::automix::TransitionPlan {
+    let mut plan = matched_plan(input);
+    plan.beat_match_rate = None;
+    (plan.both_heard_start_ms, plan.both_heard_end_ms, plan.lock_ms) = (0, 2_000, 0.0);
+    (plan.drift_gap, plan.drift_at_end_ms) = (drift / 2_000.0, drift);
+    plan
+}
+
+fn drifting_30(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    drifting_plan(input, 30.0)
+}
+
+fn drifting_10(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    drifting_plan(input, 10.0)
+}
+
+// Frames of A (left) heard when the speed is halved just as its blend
+// into B (right) begins, under `planner`.
+fn heard_when_slowed(planner: crate::automix::Planner) -> usize {
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    let a_samples: Vec<i16> = (0..RATE as usize * 12).flat_map(|_| [8_192, 0]).collect();
+    write_wav(&a, RATE, 2, &a_samples);
+    let b_samples: Vec<i16> = (0..RATE as usize * 6).flat_map(|_| [0, 8_192]).collect();
+    write_wav(&b, RATE, 2, &b_samples);
+    let (engine, events, capture, pump) = driven_engine();
+    engine.set_test_planner(Some(planner));
+    engine.set_crossfade(2_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+        .unwrap();
+    // Profiled, so the plan waits for no scout and is made before anything
+    // is played: in time, its drift kept.
+    engine.set_song_profile("a".into(), Some(profile_of(12_000, 0))).unwrap();
+    engine.set_song_profile("b".into(), Some(profile_of(6_000, 0))).unwrap();
+    engine.load(vec![item("a", &a), item("b", &b)], 0, 0, true).unwrap();
+    let planned = events
+        .wait_for("plan", Duration::from_secs(10), |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    let EngineEvent::TransitionPlanned { reason, .. } = planned else { unreachable!() };
+    assert!(!reason.contains("late"), "{reason}");
+    play_until(&pump, &events, "blend", 1_500, |e| matches!(e, EngineEvent::CrossfadeStarted { .. }));
+    engine.set_speed(0.5, 1.0).unwrap();
+    pump.play_out();
+    events.wait_for("queue end", Duration::from_secs(20), |e| matches!(e, EngineEvent::QueueEnded));
+    engine.shutdown();
+    let out = capture.lock().unwrap().clone();
+    out.chunks_exact(2).filter(|f| f[0] != 0.0).count()
+}
+
+#[test]
+fn a_lowered_speed_cuts_a_blend_where_its_beats_would_be_heard_apart() {
+    // 30 ms apart in song time by the end is 60 ms heard at half speed: the
+    // 20 ms limit there is reached 1.33 s into the blend, where it is cut,
+    // so A is heard for its 9 s and about 2.5 s more.
+    let cut = heard_when_slowed(drifting_30);
+    assert!(cut < RATE as usize * 12, "A heard for {cut} frames");
+    assert!(cut > RATE as usize * 11, "A heard for {cut} frames");
+    // 10 ms apart is 20 ms heard: the blend plays out, A for the blend's
+    // 2 s of song heard over 4 s.
+    let kept = heard_when_slowed(drifting_10);
+    assert!(kept > RATE as usize * 25 / 2, "A heard for {kept} frames");
+}
+
+// What each plan made for a 30 s song was asked from: where it plans
+// from, and whether its beats stay locked at any pace.
+static ASKED: Mutex<Vec<(f64, i64, bool)>> = Mutex::new(Vec::new());
+
+// A blend at 24 s already passed when the song is started at 25 s; asked
+// again, a blend from where it is asked, ending before the song does.
+fn asking_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    let len = input.current.duration_ms as i64;
+    let c = &input.context;
+    if len == 30_000 {
+        ASKED.lock().unwrap().push((c.pace, c.now_ms, c.lock_at_pace));
+    }
+    let mut plan = crate::automix::TransitionPlan::fixed_crossfade(len, 1_000, "asked");
+    (plan.kind, plan.k, plan.entry_ms) = (crate::automix::TransitionKind::Blend, 0.4, 0);
+    plan.start_ms = if c.now_ms < 26_000 { 24_000 } else { c.now_ms.min(len - 1_000) };
+    plan
+}
+
+#[test]
+fn a_blend_that_starts_too_soon_is_planned_again_from_where_the_next_song_is_ready() {
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_wav(&a, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 30, 0.3));
+    write_wav(&b, RATE, 2, &sine(500.0, RATE, 2, 0, RATE as usize * 8, 0.3));
+    for speed in [0.5, 1.0] {
+        ASKED.lock().unwrap().clear();
+        let (engine, events, _, _pump) = driven_engine();
+        engine.set_test_planner(Some(asking_plan));
+        engine.set_speed(speed as f32, 1.0).unwrap();
+        engine.set_crossfade(3_000).unwrap();
+        engine
+            .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+            .unwrap();
+        engine.load(vec![item("a", &a), item("b", &b)], 0, 25_000, true).unwrap();
+        let planned = events.wait_for("plan", Duration::from_secs(10), |e| {
+            matches!(e, EngineEvent::TransitionPlanned { .. })
+        });
+        let EngineEvent::TransitionPlanned { start_ms, reason, .. } = planned else { unreachable!() };
+        engine.shutdown();
+        let asked = ASKED.lock().unwrap().clone();
+        // Asked twice: once from where the song is, once from where the next
+        // song can be lined up and read again, nothing taken off.
+        assert_eq!(asked.len(), 2, "speed {speed}: {asked:?}");
+        let (now, again) = (asked[0].1, asked[1].1);
+        let ready = now + (3_000.0 * speed) as i64 + (500.0 * speed) as i64;
+        assert_eq!(again, ready, "speed {speed}: {asked:?}");
+        assert!(asked.iter().all(|&(pace, _, locked)| pace == speed && locked), "{asked:?}");
+        assert_eq!(start_ms as i64, ready, "speed {speed}: {reason}");
+        assert!(!reason.contains("late"), "speed {speed}: {reason}");
+    }
+}
+
 fn late_entry_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
     let len = input.current.duration_ms as i64;
     let mut plan = crate::automix::TransitionPlan::fixed_crossfade(len, 2_500, "test plan");
@@ -945,6 +1176,7 @@ fn a_late_plan_into_a_song_entered_part_way_still_blends() {
             match_tempo: false,
             max_overlap_ms: 8_000,
             fade_curve: crate::automix::FadeCurve::EqualPower,
+            longest_intro_ms: 16_000,
         })
         .unwrap();
     engine.load(vec![item("a", &a), item("b", &b)], 0, 9_500, true).unwrap();
@@ -1061,7 +1293,7 @@ fn profile_of(duration_ms: i64, tail_from_ms: i64) -> crate::automix::SongProfil
         boundaries_ms: Vec::new(),
         tempo: None,
     };
-    let head_hops = (duration_ms.min(30_000) / 100) as usize;
+    let head_hops = (duration_ms.min(crate::automix::profile::PROFILE_HEAD_MS) / 100) as usize;
     let tail_hops = ((duration_ms - tail_from_ms) / 100) as usize;
     crate::automix::SongProfile {
         duration_ms,
@@ -1069,7 +1301,134 @@ fn profile_of(duration_ms: i64, tail_from_ms: i64) -> crate::automix::SongProfil
         tempo: Some(tempo),
         head: section(0, head_hops),
         tail: section(tail_from_ms, tail_hops),
+        revision: crate::automix::PROFILE_REVISION,
     }
+}
+
+// A 14 s blend ending with the outgoing song, the length of a long intro.
+fn intro_length_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    let len = input.current.duration_ms as i64;
+    crate::automix::TransitionPlan::fixed_crossfade(len, 14_000, "a 14 s intro")
+}
+
+#[test]
+fn a_long_intro_is_decided_before_it_starts() {
+    // With the scouts never done, the decision waits for its deadline,
+    // which must come early enough for a 14 s intro to start as planned
+    // rather than late.
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_wav(&a, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 24, 0.3));
+    write_wav(&b, RATE, 2, &sine(500.0, RATE, 2, 0, RATE as usize * 20, 0.3));
+    let (engine, events, _, pump) = driven_engine();
+    engine.set_test_planner(Some(intro_length_plan));
+    engine.hold_scouts(true);
+    engine.set_crossfade(8_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+        .unwrap();
+    engine.load(vec![item("a", &a), item("b", &b)], 0, 0, true).unwrap();
+    let planned =
+        play_until(&pump, &events, "plan", 1_500, |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    let EngineEvent::TransitionPlanned { start_ms, overlap_ms, reason, .. } = planned else { unreachable!() };
+    assert_eq!((start_ms, overlap_ms), (10_000, 14_000), "{reason}");
+    assert!(!reason.contains("late"), "{reason}");
+    engine.shutdown();
+}
+
+// The next song's deck gain over the playing one's that the player planned
+// with, and the planner's intro level given it and given decks at one gain.
+static GAIN_PLANS: Mutex<Option<(f64, f64, f64)>> = Mutex::new(None);
+
+fn gain_recording_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    let plan = crate::automix::plan(input);
+    let mut even = input.clone();
+    even.context.incoming_gain_db = 0.0;
+    let even_level = crate::automix::plan(&even).intro_level;
+    *GAIN_PLANS.lock().unwrap() = Some((input.context.incoming_gain_db, plan.intro_level, even_level));
+    plan
+}
+
+#[test]
+fn an_intro_is_trimmed_for_the_gain_the_next_songs_deck_plays_it_at() {
+    // ReplayGain on Track, the next song tagged 6 dB louder than the
+    // playing one: the player plans with the next song 6 dB over it, and
+    // the intro's level is the planner's for that, not for decks at one
+    // gain. The next song's 11 s quiet start makes the intro.
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_wav(&a, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 60, 0.3));
+    let quiet = RATE as usize * 11;
+    let mut next = sine(500.0, RATE, 2, 0, quiet, 0.06);
+    next.extend(sine(500.0, RATE, 2, quiet, RATE as usize * 29, 0.3));
+    write_wav(&b, RATE, 2, &next);
+    let (engine, events, _, pump) = driven_engine();
+    engine.set_test_planner(Some(gain_recording_plan));
+    engine
+        .set_replaygain(crate::sound::model::ReplayGainSettings {
+            mode: crate::sound::model::ReplayGainMode::Track,
+            ..Default::default()
+        })
+        .unwrap();
+    engine.set_crossfade(8_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+        .unwrap();
+    let tagged = |id: &str, path: &Path, gain: f32| QueueItem {
+        replay_gain: Some(crate::sound::replaygain::ReplayGainInfo {
+            track_gain: Some(gain),
+            track_peak: None,
+            album_gain: None,
+            album_peak: None,
+        }),
+        ..item(id, path)
+    };
+    engine.load(vec![tagged("a", &a, 0.0), tagged("b", &b, 6.0)], 0, 0, true).unwrap();
+    let planned =
+        play_until(&pump, &events, "plan", 1_500, |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    let EngineEvent::TransitionPlanned { reason, .. } = planned else { unreachable!() };
+    let (gain, level, even) = GAIN_PLANS.lock().unwrap().take().expect("a plan");
+    assert!((gain - 6.0).abs() < 1e-3, "{gain}: {reason}");
+    assert!(reason.contains("intro at"), "{reason}");
+    assert!((level - even).abs() > 1e-3, "{level} against {even}: {reason}");
+    engine.shutdown();
+}
+
+// The longest blend and the longest intro the planner was handed, for a
+// playing song 13 s long.
+static LENGTHS: Mutex<Option<(i64, i64)>> = Mutex::new(None);
+
+fn length_recording_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    if input.current.duration_ms == 13_000 {
+        *LENGTHS.lock().unwrap() = Some((input.settings.max_overlap_ms, input.settings.longest_intro_ms));
+    }
+    test_plan(input)
+}
+
+#[test]
+fn the_longest_intro_is_kept_to_16_s_and_planned_in_song_time() {
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_wav(&a, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 13, 0.3));
+    write_wav(&b, RATE, 2, &sine(500.0, RATE, 2, 0, RATE as usize * 4, 0.3));
+    let (engine, events, _) = engine(2.0);
+    engine.set_test_planner(Some(length_recording_plan));
+    engine.set_speed(0.5, 1.0).unwrap();
+    engine.set_crossfade(8_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings {
+            smart_transitions: true,
+            longest_intro_ms: 20_000,
+            ..Default::default()
+        })
+        .unwrap();
+    engine.set_song_profile("a".into(), Some(profile_of(13_000, 0))).unwrap();
+    engine.set_song_profile("b".into(), Some(profile_of(4_000, 0))).unwrap();
+    engine.load(vec![item("a", &a), item("b", &b)], 0, 0, true).unwrap();
+    events.wait_for("plan", Duration::from_secs(10), |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    // 8 s and 16 s of listening at half speed are 4 s and 8 s of the songs.
+    assert_eq!(LENGTHS.lock().unwrap().take(), Some((4_000, 8_000)));
+    engine.shutdown();
 }
 
 #[test]
@@ -1088,6 +1447,7 @@ fn a_song_with_a_profile_is_planned_from_it_without_the_live_level() {
             match_tempo: false,
             max_overlap_ms: 8_000,
             fade_curve: crate::automix::FadeCurve::EqualPower,
+            longest_intro_ms: 16_000,
         })
         .unwrap();
     engine.set_song_profile("a".into(), Some(profile_of(12_000, 0))).unwrap();
@@ -1201,6 +1561,186 @@ fn a_smart_plan_is_made_with_the_decoded_lengths() {
     engine.shutdown();
 }
 
+// A server for the song at `path` that answers no call until `open` is set,
+// so the song's decoder opens only then.
+fn held_server(path: &Path, open: Arc<AtomicBool>) -> crate::testing::http_server::ScriptServer {
+    let body = std::fs::read(path).unwrap();
+    crate::testing::http_server::ScriptServer::start(move |_, stream, stopped| {
+        use std::io::Write;
+        while !open.load(Ordering::Acquire) {
+            if stopped.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(&body);
+    })
+}
+
+// A server for the song at `path` that sends its first second and its last
+// 64 KB at once (the decoder reads tags there) and the rest only once
+// `open` is set, so the song's decoder opens and says how long it is, while
+// a place further in has no sound until then.
+fn held_after_start(path: &Path, open: Arc<AtomicBool>) -> crate::testing::http_server::ScriptServer {
+    let body = std::fs::read(path).unwrap();
+    let first = (44 + RATE as usize * 4).min(body.len());
+    let tail = body.len().saturating_sub(64 << 10);
+    crate::testing::http_server::ScriptServer::start(move |asked, stream, stopped| {
+        use std::io::Write;
+        let from = asked
+            .header("range")
+            .and_then(|r| r.strip_prefix("bytes=")?.split('-').next()?.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(body.len());
+        let head = if from > 0 {
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/wav\r\nContent-Range: bytes {from}-{}/{}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len() - 1,
+                body.len(),
+                body.len() - from
+            )
+        } else {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+        };
+        let _ = stream.write_all(head.as_bytes());
+        let sent = if from >= tail { body.len() } else { from.max(first) };
+        let _ = stream.write_all(&body[from..sent]);
+        let _ = stream.flush();
+        while !open.load(Ordering::Acquire) {
+            if stopped.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = stream.write_all(&body[sent..]);
+    })
+}
+
+// A 16 s blend ending with the outgoing song, the longest intro, saying
+// which lengths it was planned from.
+fn longest_intro_plan(input: &crate::automix::PlanInput) -> crate::automix::TransitionPlan {
+    let len = input.current.duration_ms as i64;
+    let why = format!("lengths {} and {}", input.current.duration_ms, input.next.duration_ms);
+    crate::automix::TransitionPlan::fixed_crossfade(len, 16_000, &why)
+}
+
+// Hands every event on to `recorder`, and sets `open` as a plan is told,
+// so a held server answers only once the decision is made, whatever the
+// test is doing then.
+struct OpenOnPlan {
+    recorder: Arc<Recorder>,
+    open: Arc<AtomicBool>,
+}
+
+impl EngineListener for OpenOnPlan {
+    fn on_event(&self, event: EngineEvent) {
+        if matches!(event, EngineEvent::TransitionPlanned { .. }) {
+            self.open.store(true, Ordering::Release);
+        }
+        self.recorder.on_event(event);
+    }
+}
+
+#[test]
+fn a_next_song_that_opens_late_still_has_its_intro_decided_in_time() {
+    // A 24 s song with an 8 s crossfade and smart transitions, started 21 s
+    // from its end: song B is lined up then, before the 20 s a 16 s intro,
+    // its 3 s lead and the margin need. B's server answers nothing until the
+    // plan is made, and with both songs profiled nothing else is waited
+    // for: the decision is made 20 s from the end with B still opening, by
+    // its listed length, in time for the intro to start as planned at 8 s.
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_wav(&a, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 24, 0.3));
+    write_wav(&b, RATE, 2, &sine(500.0, RATE, 2, 0, RATE as usize * 20, 0.3));
+    let open = Arc::new(AtomicBool::new(false));
+    let server = held_server(&b, open.clone());
+    let late =
+        QueueItem { source: server.url("/b.wav"), duration_ms: Some(20_000), ..item("b", Path::new("")) };
+    let (engine, events, _, pump) = driven_engine();
+    engine.set_listener(Arc::new(OpenOnPlan { recorder: events.clone(), open }));
+    engine.set_test_planner(Some(longest_intro_plan));
+    engine.set_crossfade(8_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+        .unwrap();
+    engine.set_song_profile("a".into(), Some(profile_of(24_000, 0))).unwrap();
+    engine.set_song_profile("b".into(), Some(profile_of(20_000, 0))).unwrap();
+    engine.load(vec![item("a", &a), late], 0, 3_000, true).unwrap();
+    let planned =
+        play_until(&pump, &events, "plan", 300, |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    let EngineEvent::TransitionPlanned { start_ms, overlap_ms, reason, .. } = planned else { unreachable!() };
+    assert_eq!((start_ms, overlap_ms), (8_000, 16_000), "{reason}");
+    assert!(reason.contains("lengths 24000 and 20000"), "{reason}");
+    assert!(!reason.contains("late"), "{reason}");
+    // B opens after the decision and before the intro's start: the intro
+    // plays as planned.
+    let fade =
+        play_until(&pump, &events, "intro", 600, |e| matches!(e, EngineEvent::CrossfadeStarted { .. }));
+    assert_eq!(
+        fade,
+        EngineEvent::CrossfadeStarted { from_id: "a".into(), to_id: "b".into(), duration_ms: 16_000 }
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn a_next_song_lined_up_inside_its_intro_window_waits_for_its_decoder() {
+    // Started 6 s into the same 24 s song, B is lined up 18 s from A's end,
+    // inside the window a 16 s intro needs: it never had the time for one,
+    // so the decision waits for B's decoder until the crossfade's own
+    // deadline, 12 s from the end, and is made with the length the decoder
+    // found rather than the one listed. A's server holds A's sound past
+    // its first second, so the player knows A's length while A at 6 s has
+    // no place yet: B is not lined up as if A were at its start, 24 s from
+    // its end and before the window.
+    let dir = temp_dir();
+    let (a, b) = (dir.join("a.wav"), dir.join("b.wav"));
+    write_wav(&a, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 24, 0.3));
+    write_wav(&b, RATE, 2, &sine(500.0, RATE, 2, 0, RATE as usize * 20, 0.3));
+    let a_open = Arc::new(AtomicBool::new(false));
+    let a_server = held_after_start(&a, a_open.clone());
+    let open = Arc::new(AtomicBool::new(false));
+    let server = held_server(&b, open.clone());
+    let held = QueueItem { source: a_server.url("/a.wav"), ..item("a", Path::new("")) };
+    let late =
+        QueueItem { source: server.url("/b.wav"), duration_ms: Some(60_000), ..item("b", Path::new("")) };
+    let (engine, events, _, pump) = driven_engine();
+    engine.set_test_planner(Some(length_telling_plan));
+    engine.set_crossfade(8_000).unwrap();
+    engine
+        .set_automix(crate::automix::AutomixSettings { smart_transitions: true, ..Default::default() })
+        .unwrap();
+    engine.set_song_profile("a".into(), Some(profile_of(24_000, 0))).unwrap();
+    engine.set_song_profile("b".into(), Some(profile_of(20_000, 0))).unwrap();
+    engine.load(vec![held, late], 0, 6_000, true).unwrap();
+    wait_until("A's length known", || engine.infos_len() >= 1);
+    a_open.store(true, Ordering::Release);
+    // B is asked for once it is lined up, as the decision is first tried;
+    // a little more play passes the decision again, with B still opening.
+    wait_until("B asked for", || !server.asked().is_empty());
+    for _ in 0..20 {
+        pump.play();
+    }
+    let early = events.find(|e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    assert!(early.is_none(), "decided before B opened: {early:?}");
+    // Nothing more is played, so only B's decoder can bring the decision.
+    open.store(true, Ordering::Release);
+    let planned = events
+        .wait_for("plan", Duration::from_secs(10), |e| matches!(e, EngineEvent::TransitionPlanned { .. }));
+    let EngineEvent::TransitionPlanned { reason, .. } = planned else { unreachable!() };
+    assert!(reason.contains("lengths 24000 and 20000"), "{reason}");
+    engine.shutdown();
+}
+
 #[test]
 fn a_live_radio_stream_plays_on_with_its_titles_and_takes_no_seek() {
     use crate::testing::http_server::ScriptServer;
@@ -1266,19 +1806,27 @@ fn a_live_stream_paused_a_long_while_starts_again_where_it_is_now() {
         pump.play();
     }
     assert_eq!(server.asked().len(), 1);
-    // A long one (300 ms in tests) connects again, at the live edge.
+    // A long one (300 ms in tests) connects again, at the live edge. The
+    // pause counts from when the engine takes it, so the wait starts once
+    // it says it is paused.
+    let paused = |e: &EngineEvent| matches!(e, EngineEvent::StateChanged { state: PlaybackState::Paused });
     engine.pause().unwrap();
     pump.play();
+    wait_until("paused again", || events.all().iter().filter(|e| paused(e)).count() == 2);
     std::thread::sleep(Duration::from_millis(400));
+    let before = events.all().len();
     engine.play().unwrap();
+    // Until the engine takes the play, the output is paused and a pump
+    // gives silence at once; after it, each pump waits for sound.
+    let playing =
+        |e: &EngineEvent| matches!(e, EngineEvent::StateChanged { state } if *state != PlaybackState::Paused);
+    wait_until("playing again", || events.all()[before..].iter().any(playing));
     let again = |e: &EngineEvent| matches!(e, EngineEvent::TrackStarted { .. });
-    for _ in 0..1_000 {
+    let until = Instant::now() + Duration::from_secs(10);
+    while events.all().iter().filter(|e| again(e)).count() < 2 {
+        assert!(Instant::now() < until, "never started again: {:?}", events.story());
         pump.play();
-        if events.all().iter().filter(|e| again(e)).count() == 2 {
-            break;
-        }
     }
-    assert_eq!(events.all().iter().filter(|e| again(e)).count(), 2, "{:?}", events.story());
     assert_eq!(server.asked().len(), 2);
     assert!(engine.position().position_ms < 2_000.0, "{}", engine.position().position_ms);
     engine.shutdown();
@@ -1325,6 +1873,36 @@ fn the_player_keeps_infos_only_for_queued_songs() {
     // Three queued and the heard one.
     assert!(engine.infos_len() <= 4, "infos kept {}", engine.infos_len());
     engine.shutdown();
+}
+
+#[test]
+fn track_infos_are_counted_and_given_back() {
+    static INFOS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let dir = temp_dir();
+    let songs: Vec<QueueItem> = ["a", "b"]
+        .iter()
+        .map(|id| {
+            let path = dir.join(format!("{id}.wav"));
+            write_wav(&path, RATE, 2, &sine(300.0, RATE, 2, 0, RATE as usize * 3, 0.3));
+            item(id, &path)
+        })
+        .collect();
+    let (driver, pump) = NullDriver::driven(RATE, 2, None);
+    let engine = Engine::with_driver_counting(Box::new(move || Box::new(driver)), &INFOS);
+    engine.load(songs, 0, 0, true).unwrap();
+    for _ in 0..3_000 {
+        pump.play();
+        if engine.infos_len() > 0 {
+            break;
+        }
+    }
+    // Both are written on the player thread, so they are read until they agree.
+    wait_until("the count to follow the infos", || {
+        let held = engine.infos_len() as i64;
+        held > 0 && INFOS.load(Ordering::Relaxed) == held
+    });
+    engine.shutdown();
+    assert_eq!(INFOS.load(Ordering::Relaxed), 0);
 }
 
 #[test]

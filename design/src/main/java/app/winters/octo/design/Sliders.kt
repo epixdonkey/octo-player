@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
@@ -90,46 +91,67 @@ fun rememberFollowedFraction(fraction: () -> Float, dragging: Boolean): State<Fl
     return shown.asState()
 }
 
-// The value bubble's words.
-val BubbleText = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+// The value bubble's words, in `color`.
+fun bubbleText(color: Color) = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = color)
+
+// The jewel slider's track from its top to its bottom: a faint ink
+// deepening downward on a dark theme, the theme's off-track color on a
+// light one.
+val JewelTrackTop: Color
+    @Composable @ReadOnlyComposable
+    get() = if (LocalOctoSurfaces.current.light) OctoColors.OffTrack else OctoColors.TextPrimary.copy(alpha = 0.10f)
+val JewelTrackBottom: Color
+    @Composable @ReadOnlyComposable
+    get() = if (LocalOctoSurfaces.current.light) OctoColors.OffTrack else OctoColors.TextPrimary.copy(alpha = 0.14f)
 
 // Draws the jewel slider across the whole width, centred on `y`: the
-// recessed track, the accent fill to `fraction`, ticks for `steps`, the
-// thumb, and while dragging its ring, glow and value bubble.
+// recessed track from `track` down to `trackBottom`, the accent fill to
+// `fraction`, ticks for `steps`, the thumb, and while dragging its ring,
+// glow and value bubble (a film of `bubbleFill` with words in
+// `bubbleWords`). `shadow` is the color of the track's top shade and the
+// thumb's drop; `thumbEdge` a 1 px ring round the white thumb (a light
+// theme's edge line, so the thumb keeps its outline on a pale page).
 fun DrawScope.drawJewelSlider(
     y: Float,
     fraction: Float,
     look: JewelLook,
     fill: Color,
+    track: Color,
+    bubbleFill: Color,
+    bubbleWords: Color,
     steps: Int,
     label: String?,
     measurer: TextMeasurer?,
+    trackBottom: Color = track,
+    shadow: Color = Color.Black,
+    trackTick: Color = Color.White.copy(alpha = 0.30f),
+    thumbEdge: Color = Color.Transparent,
 ) {
-    val track = 4.dp.toPx()
+    val trackHeight = 4.dp.toPx()
     val radius = look.thumb.dp.toPx() / 2f
     // The thumb stays inside the ends of the track.
     val start = radius
     val end = size.width - radius
     val x = start + (end - start) * fraction.coerceIn(0f, 1f)
-    val top = y - track / 2f
-    val corner = CornerRadius(track / 2f)
+    val top = y - trackHeight / 2f
+    val corner = CornerRadius(trackHeight / 2f)
 
-    // The track: a faint white deepening downward, with a shade along its
-    // top edge so it reads as sunk into the surface.
+    // The track, with a shade along its top edge so it reads as sunk into
+    // the surface.
     drawRoundRect(
-        Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.14f)), startY = top, endY = top + track),
+        Brush.verticalGradient(listOf(track, trackBottom), startY = top, endY = top + trackHeight),
         Offset(0f, top),
-        Size(size.width, track),
+        Size(size.width, trackHeight),
         corner,
     )
-    drawRoundRect(Color.Black.copy(alpha = 0.25f), Offset(0f, top), Size(size.width, 1.dp.toPx().coerceAtMost(track / 2f)), corner)
+    drawRoundRect(shadow.copy(alpha = shadow.alpha * 0.25f), Offset(0f, top), Size(size.width, 1.dp.toPx().coerceAtMost(trackHeight / 2f)), corner)
 
     // The fill, shaded top to bottom.
     if (x > 0f) {
         drawRoundRect(
-            Brush.verticalGradient(listOf(fill, mix(fill, Color.Black, 0.22f)), startY = top, endY = top + track),
+            Brush.verticalGradient(listOf(fill, mix(fill, Color.Black, 0.22f)), startY = top, endY = top + trackHeight),
             Offset(0f, top),
-            Size(x, track),
+            Size(x, trackHeight),
             corner,
         )
     }
@@ -139,7 +161,7 @@ fun DrawScope.drawJewelSlider(
         val tick = 2.dp.toPx()
         for (i in 1 until steps) {
             val tx = start + (end - start) * i / steps
-            val color = if (tx <= x) Color.Black.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.30f)
+            val color = if (tx <= x) Color.Black.copy(alpha = 0.30f) else trackTick
             drawCircle(color, tick / 2f, Offset(tx, y))
         }
     }
@@ -162,7 +184,7 @@ fun DrawScope.drawJewelSlider(
 
     // The thumb: a drop shadow, then white with a highlight toward its top
     // left, then the accent dot.
-    drawCircle(Color.Black.copy(alpha = 0.35f), radius + 0.5.dp.toPx(), Offset(x, y + 1.dp.toPx()))
+    drawCircle(shadow.copy(alpha = shadow.alpha * 0.35f), radius + 0.5.dp.toPx(), Offset(x, y + 1.dp.toPx()))
     drawCircle(
         Brush.radialGradient(
             listOf(Color.White, Color(0xFFE4E6E8)),
@@ -172,12 +194,13 @@ fun DrawScope.drawJewelSlider(
         radius,
         Offset(x, y),
     )
+    if (thumbEdge.alpha > 0f) drawCircle(thumbEdge, radius - 0.5f, Offset(x, y), style = Stroke(1f))
     drawCircle(fill, radius * look.dot, Offset(x, y))
 
-    // The value bubble, 14 dp above the thumb: black at 85%, with a small
-    // arrow pointing down at it.
+    // The value bubble, 14 dp above the thumb, with a small arrow pointing
+    // down at it.
     if (label != null && measurer != null && look.bubble > 0f) {
-        val text = measurer.measure(label, BubbleText)
+        val text = measurer.measure(label, bubbleText(bubbleWords))
         val padX = 6.dp.toPx()
         val padY = 3.dp.toPx()
         val w = text.size.width + padX * 2
@@ -185,7 +208,7 @@ fun DrawScope.drawJewelSlider(
         val arrow = 4.dp.toPx()
         val bottom = y - radius - 14.dp.toPx() + arrow
         val left = (x - w / 2f).coerceIn(0f, (size.width - w).coerceAtLeast(0f))
-        val bubble = Color.Black.copy(alpha = 0.85f * look.bubble)
+        val bubble = bubbleFill.copy(alpha = bubbleFill.alpha * look.bubble)
         drawRoundRect(bubble, Offset(left, bottom - arrow - h), Size(w, h), CornerRadius(8.dp.toPx()))
         val tip = Path().apply {
             moveTo(x - arrow, bottom - arrow)

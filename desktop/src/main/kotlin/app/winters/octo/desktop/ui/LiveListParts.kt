@@ -38,6 +38,7 @@ import app.winters.octo.design.GlazeSelected
 import app.winters.octo.design.Glyph
 import app.winters.octo.design.MenuRow
 import app.winters.octo.design.MenuSeparator
+import app.winters.octo.playlists.PlaylistFolderWords
 import app.winters.octo.design.MenuTitle
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
@@ -71,7 +72,7 @@ import kotlinx.coroutines.withContext
 fun LiveMark(size: Dp, modifier: Modifier = Modifier) {
     val key = LocalKeyColour.current
     Box(modifier.size(size).clip(Corner.ArtSShape).background(key.copy(alpha = MarkWash)), contentAlignment = Alignment.Center) {
-        Glyph(OctoIcons.Filter, size = size * MarkGlyph, tint = key)
+        Glyph(OctoIcons.Filter, size = size * MarkGlyph, tint = key, exact = true)
     }
 }
 
@@ -173,6 +174,8 @@ fun newLiveList(app: AppState) {
 fun showNewListMenu(app: AppState, at: IntOffset) {
     app.popups.showAt(at) { close ->
         MenuRow("New playlist", { close(); newPlaylist(app) }, OctoIcons.Playlists)
+        // On a server that keeps the listener's playlist folders.
+        if (app.playlistFoldersOffered) MenuRow(PlaylistFolderWords.NEW_FOLDER, { close(); newFolder(app, null) }, OctoIcons.PlaylistFolder)
         MenuRow("New live list", { close(); newLiveList(app) }, OctoIcons.Filter)
     }
 }

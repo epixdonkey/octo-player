@@ -8,12 +8,14 @@ public func userMessage(_ error: Error) -> String {
     if let octo = error as? OctoError {
         switch octo {
         case .wrongCredentials: return SignInWords.wrongPassword
-        case .authUnsupported(41, _): return SignInWords.needsLegacy
+        case .authUnsupported(41, _): return SignInWords.legacyHint
         case .authUnsupported: return SignInWords.wayRefused
         case .notFound: return "That isn't on the server any more."
         case .server(_, let message): return "The server said: \(message)"
+        case .notSubsonic(let gateway?, let loginSent), .http(_, let gateway?, let loginSent):
+            return GatewayWords.failure(gateway, loginSent: loginSent)
         case .notSubsonic: return SignInWords.notMusic
-        case .http(let status):
+        case .http(let status, _, _):
             return [502, 503, 504, 520, 521, 522, 523, 524, 530].contains(status) ? SignInWords.restarting : SignInWords.notMusic
         }
     }

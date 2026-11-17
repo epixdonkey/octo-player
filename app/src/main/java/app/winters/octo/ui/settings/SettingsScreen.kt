@@ -59,10 +59,12 @@ import app.winters.octo.player.LiveBackgroundSupported
 import app.winters.octo.player.PlayerPrefs
 import app.winters.octo.player.PlayerSettings
 import app.winters.octo.player.StreamPrefs
+import app.winters.octo.server.CopyRunState
 import app.winters.octo.server.LastSync
 import app.winters.octo.server.ServerSync
 import app.winters.octo.sound.SoundEngine
 import app.winters.octo.sound.SoundSettings
+import app.winters.octo.theme.LocalActiveTheme
 import app.winters.octo.ui.common.ScreenTitle
 import app.winters.octo.ui.common.screenPadding
 import app.winters.octo.ui.nav.SettingsPageRoute
@@ -119,6 +121,7 @@ class SettingsViewModel @Inject constructor(
     val problem: StateFlow<String?> = sync.problem
     val last: StateFlow<LastSync?> = sync.last.held(null)
     val place: StateFlow<Place> = chooser.place
+    val copyRun: StateFlow<CopyRunState?> = sync.copyRun
 }
 
 // Where a setting's page is: Sound has a page of its own.
@@ -139,7 +142,7 @@ fun SettingsScreen(onOpen: (NavKey) -> Unit, vm: SettingsViewModel = hiltViewMod
             .padding(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding()),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        ScreenTitle("Settings", Modifier.padding(bottom = 0.dp))
+        ScreenTitle("Settings")
         AccountCard(onOpen, vm)
         SearchField(query, onChange = { query = it })
         if (query.isNotBlank()) {
@@ -159,8 +162,10 @@ private fun AccountCard(onOpen: (NavKey) -> Unit, vm: SettingsViewModel) {
     val problem by vm.problem.collectAsStateWithLifecycle()
     val last by vm.last.collectAsStateWithLifecycle()
     val place by vm.place.collectAsStateWithLifecycle()
+    val copyRun by vm.copyRun.collectAsStateWithLifecycle()
     val access by vm.library.access.collectAsStateWithLifecycle()
     val songs by vm.songCount.collectAsStateWithLifecycle()
+    val phoneProblem by vm.library.problem.collectAsStateWithLifecycle()
     val now by rememberClock()
 
     SettingsGroup(separatorInset = IconRowInset) {
@@ -185,27 +190,32 @@ private fun AccountCard(onOpen: (NavKey) -> Unit, vm: SettingsViewModel) {
             is SessionState.SignedIn -> {
                 val session = current.session
                 val copy = last?.takeIf { it.sourceId == session.sourceId }
-                val status = problem ?: serverStatus(
+                // A copy under way says how far it is over an older problem.
+                val run = copyRun?.takeIf { it.account == session.id }
+                val shownProblem = problem.takeIf { run == null }
+                val status = shownProblem ?: serverStatus(
                     syncing = syncing,
                     place = place.takeIf { session.connection.home != null },
                     syncedAt = copy?.at,
                     now = now,
+                    run = run,
                 )
                 AccountRow(
                     icon = OctoIcons.Cloud,
                     title = session.name,
                     lines = listOf(
                         session.client.username.ifEmpty { "Signed in with a key" } to OctoColors.TextSecondary,
-                        status to if (problem != null) OctoColors.Error else OctoColors.TextMuted,
+                        status to if (shownProblem != null) OctoColors.Error else OctoColors.TextMuted,
                     ),
                     onClick = { onOpen(routeFor(SettingsPage.Server)) },
                 )
             }
         }
+        // A scan that could not be saved says why, as a copy does.
         AccountRow(
             icon = OctoIcons.Phone,
             title = phoneLine(access, songs),
-            lines = emptyList(),
+            lines = listOfNotNull(phoneProblem?.let { it to OctoColors.Error }),
             onClick = { onOpen(routeFor(SettingsPage.Library)) },
         )
     }
@@ -293,13 +303,20 @@ private fun Categories(onOpen: (NavKey) -> Unit, vm: SettingsViewModel) {
     val state by vm.session.collectAsStateWithLifecycle()
     val syncing by vm.syncing.collectAsStateWithLifecycle()
     val last by vm.last.collectAsStateWithLifecycle()
+    val copyRun by vm.copyRun.collectAsStateWithLifecycle()
     val now by rememberClock()
     val open = remember(onOpen) { { page: SettingsPage -> onOpen(routeFor(page)) } }
 
     val serverLine = when (val current = state) {
         SessionState.Loading -> ""
         SessionState.SignedOut -> "Not connected"
-        is SessionState.SignedIn -> serverStatus(syncing, null, last?.takeIf { it.sourceId == current.session.sourceId }?.at, now)
+        is SessionState.SignedIn -> serverStatus(
+            syncing,
+            null,
+            last?.takeIf { it.sourceId == current.session.sourceId }?.at,
+            now,
+            run = copyRun?.takeIf { it.account == current.session.id },
+        )
     }
 
     SettingsGroup(title = "Listening", separatorInset = IconRowInset) {
@@ -309,7 +326,7 @@ private fun Categories(onOpen: (NavKey) -> Unit, vm: SettingsViewModel) {
         CategoryRow(
             OctoIcons.Appearance,
             SettingsPage.Appearance.title,
-            appearanceSummary(player.ambient, player.liveBackground && LiveBackgroundSupported),
+            appearanceSummary(LocalActiveTheme.current, player.ambient, player.liveBackground && LiveBackgroundSupported),
         ) { open(SettingsPage.Appearance) }
     }
     SettingsGroup(title = "Your music", separatorInset = IconRowInset) {

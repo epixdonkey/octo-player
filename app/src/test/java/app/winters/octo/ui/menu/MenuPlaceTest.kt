@@ -75,7 +75,7 @@ class MenuPlaceTest {
             songActions(find = false, radio = false, place = here),
         )
         // A find on a playlist page can be taken out too.
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, RemoveFromPlaylist, Info), songActions(find = true, radio = false, place = here))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, RemoveFromPlaylist, Info), songActions(find = true, radio = false, place = here))
         // Without the row there is nothing to take out.
         assertFalse(place(SongMenuContext(playlistId = "p")).inPlaylist)
     }
@@ -89,6 +89,8 @@ class MenuPlaceTest {
             listOf(PlayNext, AddToQueue, AddToPlaylist, Select, Like, Rate, GoToAlbum, GoToArtist, Info),
             songActions(find = false, radio = false, place = picking),
         )
+        // A row is picked as the list finds it among the rows it read.
+        selection.resolve = { key -> app.winters.octo.ui.common.Picked(key, key, null, true, key, "", null) }
         selection.start("t")
         assertFalse(place(SongMenuContext(selection = selection, selectKey = "t")).selectable)
         // A list that cannot pick offers no Select.

@@ -52,7 +52,7 @@ import Testing
     @Test func serverErrorsInPlainWords() {
         #expect(userMessage(URLError(.cannotConnectToHost)) == "Couldn't reach the server. Check the address, and that you're on the right network.")
         #expect(userMessage(OctoError.http(503)) == "The server isn't answering right now. It may be restarting, so try again in a moment.")
-        #expect(userMessage(OctoError.notSubsonic) == "That address answered, but not like a music server. Check the port.")
+        #expect(userMessage(OctoError.notSubsonic()) == "That address answered, but not like a music server. Check the port.")
         #expect(userMessage(OctoError.wrongCredentials("x")) == "Wrong username or password.")
         #expect(userMessage(OctoError.notFound("x")) == "That isn't on the server any more.")
         #expect(userMessage(OctoError.server(code: 0, message: "Nope")) == "The server said: Nope")
@@ -102,6 +102,12 @@ import Testing
         #expect(albumDownloadLabel(songs: 3, held: 2, done: 0) == "Download album")
         #expect(albumDownloadLabel(songs: 3, held: 3, done: 1) == "Downloading")
         #expect(albumDownloadLabel(songs: 3, held: 3, done: 3) == "Downloaded")
+        // A page with songs outside the library: the button counts what it saves.
+        #expect(albumDownloadLabel(songs: 1, held: 0, done: 0, outside: 29) == "Download 1 song to this phone")
+        #expect(albumDownloadLabel(songs: 3, held: 1, done: 1, outside: 9) == "Download 3 songs to this phone")
+        #expect(albumDownloadLabel(songs: 3, held: 3, done: 1, outside: 9) == "Downloading")
+        #expect(albumDownloadLabel(songs: 1, held: 1, done: 1, outside: 29) == "1 song downloaded")
+        #expect(albumDownloadLabel(songs: 3, held: 3, done: 3, outside: 9) == "3 songs downloaded")
         #expect(albumLibraryNote(inLibrary: 3, songs: 10) == "3 of 10 in your library")
         #expect(albumLibraryNote(inLibrary: 10, songs: 10) == nil)
         #expect(addMissingLabel(missing: 1) == "Add the missing song")

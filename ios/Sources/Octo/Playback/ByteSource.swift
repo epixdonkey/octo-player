@@ -90,10 +90,13 @@ final class SavedCopy: ByteSource, @unchecked Sendable {
 /// A song read from the server by parts: what is asked for downloads into a file of its own on
 /// the phone, from the place a read needs onwards, so the player can jump about and a part read
 /// once is not fetched again. Each request is signed as it goes out (`sign`), so no address is
-/// kept. A failed request is tried again after 0, 1 and 2 seconds; a refusal to load at all (no
-/// connection, no server) fails at once.
+/// kept, and goes with the store its answers keep a sign-in page's cookies in. A sign-in page
+/// answering in the server's place (a web page where a server song was asked for, or a 401 or 403
+/// it is known by) is refused at once and not asked again. Any other failed request is tried
+/// again after 0, 1 and 2 seconds; a refusal to load at all (no connection, no server) fails at
+/// once.
 final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked Sendable {
-    private let sign: @Sendable () throws -> URLRequest
+    private let sign: @Sendable () throws -> SignedStream
     /// The name the song is saved under among the songs kept on the phone, when it is kept.
     private let savedKey: String?
     /// Whether the phone is online now; a failed request is not tried again while it is not.
@@ -105,6 +108,9 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
     private var cancelled = false
     private var type: String?
     private var responseHeaders: [String: [String]] = [:]
+    /// What each task went out with, by task, so its answers keep cookies in that request's
+    /// store.
+    private var asked: [Int: SignedStream] = [:]
 
     /// The request downloading now: where it started, where it writes next.
     private var task: URLSessionDataTask?
@@ -125,6 +131,11 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
     /// The player has had the length or bytes: from then on another file cannot take this one's
     /// place, and the song is opened again instead.
     private var served = false
+    /// The video the server named for this song's stream (a song found online), once it did.
+    private var video: String?
+    /// The generation of the song's saved copies this file saves under: once they are dropped (a
+    /// version picked for the song), nothing it writes or describes lands.
+    private let generation: Int
 
     private let file: URL
     private let handle: FileHandle
@@ -135,6 +146,9 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
         let config = URLSessionConfiguration.default.namingOcto(Session.appVersion)
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.urlCache = nil
+        // Cookies are kept by the signing client's own store, never by the system.
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
         return URLSession(configuration: config, delegate: self, delegateQueue: queue)
     }()
 
@@ -142,10 +156,11 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
     private static let jumpAhead: Int64 = 512 * 1024
 
     init(savedKey: String? = nil, online: @escaping @Sendable () -> Bool = { true },
-         sign: @escaping @Sendable () throws -> URLRequest) throws {
+         sign: @escaping @Sendable () throws -> SignedStream) throws {
         self.sign = sign
         self.savedKey = savedKey
         self.online = online
+        generation = savedKey.flatMap { key in try? blocking { await StreamCache.shared.generation(key) } } ?? 0
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("playing", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         file = folder.appendingPathComponent(UUID().uuidString)
@@ -232,27 +247,39 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
         }
     }
 
-    /// Asks for the first byte alone and answers whether the server sends parts of a song.
+    /// Asks for the first byte alone and answers whether the server sends parts of a song. The ask
+    /// goes through this file's own session, so its redirects keep the server's rules and its
+    /// answer's sign-in page cookies are kept.
     func answersRanges() -> Bool {
-        guard var request = try? sign() else { return false }
+        guard let signed = try? sign() else { return false }
+        var request = signed.request
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         let done = DispatchSemaphore(value: 0)
         final class Answer: @unchecked Sendable { var ranged = false }
         let answer = Answer()
-        let probeSession = URLSession(configuration: URLSessionConfiguration.ephemeral.namingOcto(Session.appVersion), delegate: TrustDelegate(),
-                                      delegateQueue: nil)
-        defer { probeSession.finishTasksAndInvalidate() }
-        let probe = probeSession.dataTask(with: request) { _, response, _ in
+        condition.lock()
+        // A stopped file's session is gone, and no task may be made on it.
+        if cancelled {
+            condition.unlock()
+            return false
+        }
+        let probe = session.dataTask(with: request) { _, response, _ in
             if let http = response as? HTTPURLResponse {
+                storeCookies(of: http, in: signed.cookies, scope: signed.scope)
                 var headers: [String: [String]] = [:]
                 for (key, value) in http.allHeaderFields { headers["\(key)"] = ["\(value)"] }
                 answer.ranged = OctoKit.answersRanges(headers)
             }
             done.signal()
         }
+        asked[probe.taskIdentifier] = signed
+        condition.unlock()
         probe.resume()
         _ = done.wait(timeout: .now() + 20)
         probe.cancel()
+        condition.lock()
+        asked[probe.taskIdentifier] = nil
+        condition.unlock()
         return answer.ranged
     }
 
@@ -283,6 +310,7 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
         let info = (try? blocking { await StreamCache.shared.info(savedKey).map { Unchecked($0) } }) ?? nil
         if total == nil, let length = info?.value.length, length > 0 { total = length }
         if type == nil { type = info?.value.mimeType }
+        if video == nil { video = info?.value.video }
         if let total {
             let run = (try? blocking { await StreamCache.shared.savedRun(savedKey, from: 0) }) ?? 0
             savedPartly = run > 0 && run < total
@@ -358,17 +386,19 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
     private func start(from offset: Int64) throws {
         task?.cancel()
         task = nil
-        var request: URLRequest
+        let signed: SignedStream
         do {
-            request = try sign()
+            signed = try sign()
         } catch let error as PlayError {
             failure = error
             condition.broadcast()
             throw error
         }
+        var request = signed.request
         request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
         request.timeoutInterval = 30
         let next = session.dataTask(with: request)
+        asked[next.taskIdentifier] = signed
         task = next
         taskStart = offset
         writeAt = offset
@@ -391,17 +421,42 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         condition.lock()
         defer { condition.unlock() }
+        // The answer's sign-in page cookies are kept whatever it is, in the store of the client
+        // that signed its request.
+        if let http = response as? HTTPURLResponse, let signed = asked[dataTask.taskIdentifier] {
+            storeCookies(of: http, in: signed.cookies, scope: signed.scope)
+        }
         guard dataTask === task, let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+        // A sign-in page answering in the server's place (a web page where a server song was
+        // asked for, or a 401 or 403 it is known by) is never played or saved, and not asked for
+        // again.
+        if let signed = asked[dataTask.taskIdentifier],
+           signInPageInstead(of: http, sent: dataTask.originalRequest, scope: signed.scope) != nil {
+            task = nil
+            failure = PlayError(.signInPage, httpStatus: http.statusCode, detail: "a sign-in page answered")
+            condition.broadcast()
             completionHandler(.cancel)
             return
         }
         guard (200..<300).contains(http.statusCode) else {
             task = nil
             errorsInARow += 1
-            // A refusal is asked again like a broken connection, except a place past the end.
-            if http.statusCode != 416 && errorsInARow <= 3 && online() {
+            switch refusalAction(status: http.statusCode, offset: taskStart, errorsInARow: errorsInARow, online: online()) {
+            case .reopen:
+                // The server let go of the file the song was read from: the saved copy goes before
+                // the player opens the song again (so the reopen never reads the old bytes), from
+                // the file the server has now, at its place.
+                ignoreSaved = true
+                if let savedKey {
+                    _ = try? blocking { await StreamCache.shared.drop(savedKey) }
+                }
+                failure = PlayError(.sourceChanged, detail: "the server let go of the song's file")
+            case .retry:
                 retryLater()
-            } else {
+            case .fail:
                 failure = PlayError(.badHttpStatus, httpStatus: http.statusCode, detail: "HTTP \(http.statusCode)")
             }
             condition.broadcast()
@@ -410,16 +465,20 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
         }
         let answer = streamShapeOf(status: http.statusCode, contentType: http.mimeType,
                                    contentRange: http.value(forHTTPHeaderField: "Content-Range"),
-                                   contentLength: http.expectedContentLength)
-        let changed = StreamShape(type: type, total: total).differs(from: answer)
+                                   contentLength: http.expectedContentLength,
+                                   video: http.value(forHTTPHeaderField: VIDEO_HEADER))
+        let changed = StreamShape(type: type, total: total, video: video).differs(from: answer)
         if changed {
-            // Another file than the one begun or saved (a whole FLAC for a listed preview, say):
-            // the saved copy goes with its length and type, and nothing held of it is read again.
+            // Another file than the one begun or saved (a whole FLAC for a listed preview, or
+            // another video of a song found online): the saved copy goes with its length, type and
+            // video, and nothing held of it is read again.
             ignoreSaved = true
             if let savedKey {
                 let length = answer.total
                 let mime = http.mimeType
-                Task { await StreamCache.shared.answered(savedKey, contentLength: length, mimeType: mime) }
+                let named = answer.video
+                let made = self.generation
+                Task { await StreamCache.shared.answered(savedKey, contentLength: length, mimeType: mime, video: named, generation: made) }
             }
             if served {
                 // The player has read the other file: it opens the song again.
@@ -432,6 +491,7 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
             held = ByteRanges()
             total = nil
             type = nil
+            video = nil
             responseHeaders = [:]
             sendsParts = nil
             if http.statusCode == 206 && taskStart > 0 {
@@ -448,6 +508,7 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
             for (key, value) in http.allHeaderFields { responseHeaders["\(key)"] = ["\(value)"] }
         }
         if type == nil { type = http.mimeType }
+        if video == nil { video = answer.video }
         if http.statusCode == 206, let range = http.value(forHTTPHeaderField: "Content-Range"),
            let whole = range.split(separator: "/").last.flatMap({ Int64($0) }) {
             if total == nil { total = whole }
@@ -464,7 +525,9 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
         if let savedKey, !changed {
             let length = total
             let mime = http.mimeType
-            Task { await StreamCache.shared.describe(savedKey, contentLength: length, mimeType: mime) }
+            let named = answer.video
+            let made = self.generation
+            Task { await StreamCache.shared.describe(savedKey, contentLength: length, mimeType: mime, video: named, generation: made) }
         }
         condition.broadcast()
         completionHandler(.allow)
@@ -486,7 +549,8 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
         if let savedKey {
             // Saved as it plays, under the song's stable name, so it plays again without the network.
             let at = writeAt
-            Task { await StreamCache.shared.write(savedKey, offset: at, data: data) }
+            let made = self.generation
+            Task { await StreamCache.shared.write(savedKey, offset: at, data: data, generation: made) }
         }
         writeAt += Int64(data.count)
         condition.broadcast()
@@ -494,13 +558,24 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? {
-        ServerTrust.shared.redirected(request, first: task.originalRequest)
+        // Each hop keeps the server's rules for headers and its sign-in page's cookies, in the
+        // store of the client that signed the request, and gets that client's sign-in page
+        // headers at a gateway address.
+        let signed = sent(task) ?? .outside(request)
+        return hop(response: response, newRequest: request, first: task.originalRequest?.url,
+                   cookies: signed.cookies, scope: signed.scope, headers: signed.headers)
+    }
+
+    /// What a task went out with, and so the store its answers keep cookies in.
+    private func sent(_ task: URLSessionTask) -> SignedStream? {
+        condition.withLock { asked[task.taskIdentifier] }
     }
 
     func urlSession(_ session: URLSession, task finished: URLSessionTask, didCompleteWithError error: Error?) {
         ServerTrust.shared.noteEnd(of: finished.originalRequest, error)
         condition.lock()
         defer { condition.unlock() }
+        asked[finished.taskIdentifier] = nil
         guard finished === task else { return }
         task = nil
         if let error {
@@ -521,18 +596,11 @@ final class RemoteFile: NSObject, ByteSource, URLSessionDataDelegate, @unchecked
                 // The saved copy takes the length the song really has, so it counts as whole.
                 if let savedKey, held.covers(0..<writeAt) {
                     let length = writeAt
-                    Task { await StreamCache.shared.describe(savedKey, contentLength: length, mimeType: nil) }
+                    let made = self.generation
+                    Task { await StreamCache.shared.describe(savedKey, contentLength: length, mimeType: nil, generation: made) }
                 }
             }
         }
         condition.broadcast()
-    }
-}
-
-/// Answers certificate questions the way the rest of the app does.
-final class TrustDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge)
-        async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
-        ServerTrust.shared.answer(challenge)
     }
 }

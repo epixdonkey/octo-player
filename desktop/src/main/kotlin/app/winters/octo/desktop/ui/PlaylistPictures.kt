@@ -81,8 +81,9 @@ fun DesignedCover(app: AppState, order: CoverOrder, modifier: Modifier, shape: S
         LaunchedEffect(key) {
             if (spec != null && ready == null) shown = store.art(spec, side)
         }
-        val ground = remember(spec?.id, palette) {
-            spec?.let { s -> Color(backgroundColour(chooseBackground(s.id, s.palette))) } ?: OctoColors.BackgroundTertiary
+        val bare = OctoColors.BackgroundTertiary
+        val ground = remember(spec?.id, palette, bare) {
+            spec?.let { s -> Color(backgroundColour(chooseBackground(s.id, s.palette))) } ?: bare
         }
         Box(Modifier.matchParentSize().background(ground))
         (ready ?: shown)?.let {
@@ -108,7 +109,7 @@ fun playlistOrder(playlist: Playlist, you: String?) = CoverOrder(
 )
 
 // A playlist read with its songs, as the list of playlists has it.
-fun PlaylistWithSongs.summary() = Playlist(id, name, comment, owner, public, songCount, duration, coverArt, changed, readonly, created, octoList = octoList, octoNotice = octoNotice, octoCoverTitle = octoCoverTitle, octoFamily = octoFamily, octoFamilyCreatedBy = octoFamilyCreatedBy, octoFamilyMayRename = octoFamilyMayRename, octoFamilyMayDelete = octoFamilyMayDelete)
+fun PlaylistWithSongs.summary() = Playlist(id, name, comment, owner, public, songCount, duration, coverArt, changed, readonly, created, octoList = octoList, octoNotice = octoNotice, octoCoverTitle = octoCoverTitle, octoFamily = octoFamily, octoFamilyCreatedBy = octoFamilyCreatedBy, octoFamilyMayRename = octoFamilyMayRename, octoFamilyMayDelete = octoFamilyMayDelete, octoUpkeep = octoUpkeep, octoImport = octoImport, octoUpkeepKind = octoUpkeepKind)
 
 // A playlist's picture, as the listener chose: designed, or the server's mosaic.
 @Composable

@@ -1,6 +1,7 @@
 package app.winters.octo.ui.search
 
 import app.winters.octo.ui.common.LocalReduceMotion
+import app.winters.octo.ui.common.LocalOwnedFinds
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.infiniteRepeatable
@@ -125,8 +126,9 @@ fun SearchScreen(onOpen: (NavKey) -> Unit, vm: SearchViewModel = hiltViewModel()
     // "Library songs only" leaves out what the server found online.
     val libraryOnly = LocalLibraryOnly.current
     val setLibraryOnly = LocalSetLibraryOnly.current
-    val top = if (libraryOnly) anyTop?.inLibraryOnly() else anyTop
-    val chart = if (libraryOnly) anyChart?.inLibraryOnly() else anyChart
+    val owned = LocalOwnedFinds.current
+    val top = if (libraryOnly) anyTop?.inLibraryOnly(owned) else anyTop
+    val chart = if (libraryOnly) anyChart?.inLibraryOnly(owned) else anyChart
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 120.dp
     val keyboard = LocalSoftwareKeyboardController.current
     val list = rememberLazyListState()
@@ -240,6 +242,9 @@ private class Shown(
     val onHintSeen: () -> Unit,
 ) {
     val finds: Discovered? = (online as? DiscoverState.Done)?.found
+
+    // Why the server could not be asked, said after the line.
+    val why: String? = (online as? DiscoverState.Failed)?.why
 
     // Whether the server is asked at all, so library songs keep the add
     // button's space and their lengths line up with the finds'.
@@ -517,7 +522,7 @@ private fun LazyListScope.outsideRows(shown: Shown, look: OutsideLook, kind: Str
             items(WAITING_ROWS, key = { "outside:$kind:waiting:$it" }) { WaitingRow(round = kind == "artists", n = it) }
         }
         OutsideLook.NoneFound -> item(key = "outside:$kind:line") { OutsideLine(look, shown.query, kind) }
-        OutsideLook.Failed -> item(key = "outside:$kind:line") { OutsideLine(look, shown.query, kind, shown.onRetry) }
+        OutsideLook.Failed -> item(key = "outside:$kind:line") { OutsideLine(look, shown.query, kind, shown.onRetry, shown.why) }
         OutsideLook.Found -> {
             // The line stays where it said it was looking, quieter, over
             // the finds that took the waiting rows' places.
@@ -533,10 +538,10 @@ private fun LazyListScope.outsideRows(shown: Shown, look: OutsideLook, kind: Str
 // The line between the library's results and the server's, on the rows'
 // lines: its mark centred where their covers are, its words where their
 // titles start. A small spinner while the server looks, a warning mark
-// when it could not be asked, the plus over the finds.
+// when it could not be asked, with why, the plus over the finds.
 @Composable
-private fun OutsideLine(look: OutsideLook, query: String, kind: String, onRetry: (() -> Unit)? = null) {
-    val text = outsideLine(look, query, kind) ?: return
+private fun OutsideLine(look: OutsideLook, query: String, kind: String, onRetry: (() -> Unit)? = null, why: String? = null) {
+    val text = (outsideLine(look, query, kind) ?: return) + (why?.let { ". $it" } ?: "")
     Row(
         Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = ListRowSide, end = 10.dp),
         verticalAlignment = Alignment.CenterVertically,

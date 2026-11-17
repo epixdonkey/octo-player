@@ -5,22 +5,34 @@ import UniformTypeIdentifiers
 
 /// Streams a server song through the saved songs: every range the player asks for is answered
 /// from the phone when it is saved there, and otherwise fetched from the server (with the app's
-/// trusted session) and saved as it plays, under the song's stable key. Keep the stream alive as
-/// long as its asset.
+/// trusted session, the signed request's headers and the sign-in page's cookies of the client
+/// that signed it) and saved as it plays, under the song's stable key. A sign-in page answering in
+/// the song's place (a web page, or a 401 or 403 it is known by) is refused, never saved. Keep the
+/// stream alive as long as its asset.
 final class CachingStream: NSObject, AVAssetResourceLoaderDelegate, URLSessionDataDelegate, @unchecked Sendable {
     static let scheme = "octo-saved"
 
     private let key: String
-    private let headers: [String: String]
+    private let signed: SignedStream
     private let cache: StreamCache
     private let queue = DispatchQueue(label: "app.winters.octo.saved-stream")
-    private lazy var session = URLSession(configuration: .default, delegate: self,
-                                          delegateQueue: { let q = OperationQueue(); q.underlyingQueue = queue; return q }())
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.default.namingOcto(Session.appVersion)
+        // Cookies are kept by the signing client's own store, never by the system.
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        let delegateQueue = OperationQueue()
+        delegateQueue.underlyingQueue = self.queue
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
+    }()
     private var requests: [Int: (request: AVAssetResourceLoadingRequest, offset: Int64)] = [:]
+    /// The generation of the song's saved copies this stream saves under (`StreamCache.generation`).
+    private let generation: Int
 
-    init(key: String, headers: [String: String], cache: StreamCache = .shared) {
+    init(key: String, signed: SignedStream, generation: Int, cache: StreamCache = .shared) {
         self.key = key
-        self.headers = headers
+        self.signed = signed
+        self.generation = generation
         self.cache = cache
     }
 
@@ -64,8 +76,7 @@ final class CachingStream: NSObject, AVAssetResourceLoaderDelegate, URLSessionDa
                 return
             }
         }
-        var fetch = URLRequest(url: source)
-        for (name, value) in headers { fetch.setValue(value, forHTTPHeaderField: name) }
+        var fetch = signed.asking(source)
         if let data = request.dataRequest {
             if wantsAll || request.contentInformationRequest != nil {
                 fetch.setValue("bytes=\(start)-", forHTTPHeaderField: "Range")
@@ -106,13 +117,21 @@ final class CachingStream: NSObject, AVAssetResourceLoaderDelegate, URLSessionDa
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse)
         async -> URLSession.ResponseDisposition {
-        guard let waiting = requests[dataTask.taskIdentifier], let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode)
-        else { return .cancel }
+        guard let waiting = requests[dataTask.taskIdentifier], let http = response as? HTTPURLResponse else { return .cancel }
+        storeCookies(of: http, in: signed.cookies, scope: signed.scope)
+        // A sign-in page answering in the song's place (a web page, or a 401 or 403 it is known
+        // by) is never played, never saved as the song, and not asked for again.
+        if signInPageInstead(of: http, sent: dataTask.originalRequest, scope: signed.scope) != nil {
+            requests[dataTask.taskIdentifier] = nil
+            waiting.request.finishLoading(with: PlayError(.signInPage, httpStatus: http.statusCode, detail: "a sign-in page answered"))
+            return .cancel
+        }
+        guard (200..<300).contains(http.statusCode) else { return .cancel }
         let length = TrustedStream.totalLength(http)
         // A whole answer to a ranged ask starts at the top of the file.
         if http.statusCode == 200 { requests[dataTask.taskIdentifier]?.offset = 0 }
-        await cache.describe(key, contentLength: length > 0 ? length : nil, mimeType: http.mimeType)
+        await cache.describe(key, contentLength: length > 0 ? length : nil, mimeType: http.mimeType,
+                             video: http.value(forHTTPHeaderField: VIDEO_HEADER), generation: generation)
         if let content = waiting.request.contentInformationRequest {
             if let mime = http.mimeType, let type = UTType(mimeType: mime) { content.contentType = type.identifier }
             content.contentLength = length
@@ -128,12 +147,14 @@ final class CachingStream: NSObject, AVAssetResourceLoaderDelegate, URLSessionDa
         requests[dataTask.taskIdentifier]?.offset = offset + Int64(data.count)
         let key = key
         let cache = cache
-        Task { await cache.write(key, offset: offset, data: data) }
+        let made = generation
+        Task { await cache.write(key, offset: offset, data: data, generation: made) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? {
-        ServerTrust.shared.redirected(request, first: task.originalRequest)
+        hop(response: response, newRequest: request, first: task.originalRequest?.url, cookies: signed.cookies, scope: signed.scope,
+            headers: signed.headers)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

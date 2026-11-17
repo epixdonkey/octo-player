@@ -23,7 +23,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -38,10 +40,11 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import app.winters.octo.catalog.NotEnoughSpace
 import app.winters.octo.catalog.PlaylistSummary
-import app.winters.octo.catalog.TrackEntity
-import app.winters.octo.catalog.UserDao
+import app.winters.octo.data.spaceWords
 import app.winters.octo.design.AccentButton
+import app.winters.octo.playback.ListSpec
 import app.winters.octo.design.GlassPopup
 import app.winters.octo.design.GlazeButton
 import app.winters.octo.design.OctoColors
@@ -54,7 +57,14 @@ import app.winters.octo.livelists.LiveListStore
 import app.winters.octo.offline.OfflineDownloads
 import app.winters.octo.playback.PlaylistStore
 import app.winters.octo.playlists.PlaylistFiles
+import app.winters.octo.playlists.PlaylistFolderStore
+import app.winters.octo.playlists.PlaylistFolderTree
+import app.winters.octo.playlists.PlaylistFolderWords
 import app.winters.octo.playlists.RecentPlaylists
+import app.winters.octo.catalog.isFind
+import app.winters.octo.ui.common.GlassMenuSeparator
+import app.winters.octo.ui.common.GlassMenuTitle
+import kotlinx.coroutines.flow.combine
 import app.winters.octo.playlists.playlistFileName
 import app.winters.octo.ui.common.CloudMark
 import app.winters.octo.ui.common.Feedback
@@ -74,11 +84,8 @@ import app.winters.octo.ui.common.songs
 import app.winters.octo.ui.livelists.liveCopyMessage
 import app.winters.octo.ui.livelists.nothingToCopy
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -86,30 +93,35 @@ import javax.inject.Inject
 // The menus and forms for playlists. They pop up over everything, the bar
 // included, so any page can open one.
 sealed interface PlaylistSheet {
-    // Choose a playlist to add songs to: many picked in a list, say.
-    data class Pick(val trackIds: List<String>) : PlaylistSheet {
+    // Choose a playlist to add songs to: many picked in a list, say, or a
+    // whole album, artist or playlist.
+    data class Pick(val source: AddSource) : PlaylistSheet {
+        constructor(trackIds: List<String>) : this(AddSource.Ids(trackIds))
         constructor(trackId: String) : this(listOf(trackId))
     }
 
-    // Name a new playlist, and put the songs in it if there are any.
-    data class Create(val trackIds: List<String> = emptyList()) : PlaylistSheet
+    // Name a new playlist, and put the songs in it if there are any; made
+    // from inside a folder (`folderId`), it lands there.
+    data class Create(val trackIds: List<String> = emptyList(), val folderId: String? = null) : PlaylistSheet
 
     // Rename or delete a playlist, or save one only on the phone to the
     // server when `canSave`. `onServer` is one kept with the server.
-    // `canDownload` when some of its songs are only on a server. `keep`,
-    // the playlist's songs, offers its Keep downloaded switch, from its page.
-    // A family playlist (`family`) is renamed and deleted only by a manager
-    // (`canRename`, `canDelete`).
+    // `canDownload` when some of its songs are only on a server. `keep`
+    // offers its Keep downloaded switch, from its page. A family playlist
+    // (`family`) is renamed and deleted only by a manager (`canRename`,
+    // `canDelete`).
     data class Options(
         val id: String,
         val name: String,
         val onServer: Boolean = false,
         val canSave: Boolean = false,
         val canDownload: Boolean = false,
-        val keep: List<TrackEntity>? = null,
+        val keep: Boolean = false,
         val family: Boolean = false,
         val canRename: Boolean = true,
         val canDelete: Boolean = true,
+        // Its placement key while it can be filed and folders are offered.
+        val placeKey: String? = null,
     ) : PlaylistSheet
     data class Rename(val id: String, val name: String) : PlaylistSheet
     data class Delete(val id: String, val name: String, val onServer: Boolean = false, val family: Boolean = false) : PlaylistSheet
@@ -119,6 +131,17 @@ sealed interface PlaylistSheet {
     data class LiveOptions(val id: String, val name: String) : PlaylistSheet
     data class LiveRename(val id: String, val name: String) : PlaylistSheet
     data class LiveDelete(val id: String, val name: String) : PlaylistSheet
+
+    // Playlist folders: name a new one in `parent` (null: the top level),
+    // placing `placing` playlists or `moving` a folder into it once made;
+    // rename, delete (asked) or move one; move playlists; fill one from a
+    // checklist; a folder's options.
+    data class NewFolder(val parent: String? = null, val placing: List<String> = emptyList(), val moving: String? = null) : PlaylistSheet
+    data class RenameFolder(val id: String, val name: String) : PlaylistSheet
+    data class DeleteFolder(val id: String, val name: String) : PlaylistSheet
+    data class MoveToFolder(val target: FolderMoveTarget) : PlaylistSheet
+    data class AddPlaylists(val folderId: String, val name: String) : PlaylistSheet
+    data class FolderOptions(val id: String, val name: String) : PlaylistSheet
 }
 
 class PlaylistSheets {
@@ -154,14 +177,61 @@ class PlaylistSheetsViewModel @Inject constructor(
     private val store: PlaylistStore,
     private val offline: OfflineDownloads,
     private val files: PlaylistFiles,
-    private val userDao: UserDao,
     private val feedback: Feedback,
     private val recent: RecentPlaylists,
     private val liveLists: LiveListStore,
     private val liveSongs: LiveListSongs,
+    private val sources: AddSources,
+    private val folders: PlaylistFolderStore,
 ) : ViewModel() {
     val playlists: StateFlow<List<PlaylistSummary>> =
         store.playlists.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // Whether folders are offered, and the folders.
+    val folderView: StateFlow<FolderView> =
+        combine(folders.offered, folders.tree) { on, tree -> FolderView(on, tree) }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FolderView.Off)
+
+    // Whether songs found online can go in a playlist on this server.
+    val findsOpen: Boolean get() = store.findsOpen
+
+    // Whether what an add brings holds a song found online that can go in:
+    // then the picker leaves out the upkeep lists that refuse one.
+    suspend fun holdsFind(source: AddSource): Boolean {
+        if (!store.findsOpen) return false
+        return when (source) {
+            is AddSource.Ids -> source.ids.any(::isFind)
+            is AddSource.Spec -> when (val spec = source.spec) {
+                is ListSpec.Album -> spec.withFinds
+                is ListSpec.Playlist -> store.holdsFind(spec.playlistId)
+                else -> false
+            }
+        }
+    }
+
+    // A folder made here, with playlists placed in it or a folder moved in.
+    fun newFolder(name: String, parent: String?, placing: List<String>, moving: String?) {
+        viewModelScope.launch {
+            val id = folders.create(name, parent) ?: return@launch
+            if (placing.isNotEmpty()) folders.place(placing, id)
+            moving?.let { folders.move(it, id)?.let { refusal -> feedback.show(refusal.words) } }
+        }
+    }
+
+    fun renameFolder(id: String, name: String) {
+        viewModelScope.launch { folders.rename(id, name) }
+    }
+
+    fun deleteFolder(id: String) {
+        viewModelScope.launch { folders.delete(id) }
+    }
+
+    fun place(keys: List<String>, folderId: String?) {
+        viewModelScope.launch { folders.place(keys, folderId) }
+    }
+
+    fun moveFolder(id: String, parent: String?) {
+        viewModelScope.launch { folders.move(id, parent)?.let { feedback.show(it.words) } }
+    }
 
     // The playlists songs were added to lately, newest first, by id.
     val recentIds: StateFlow<List<String>> =
@@ -171,20 +241,28 @@ class PlaylistSheetsViewModel @Inject constructor(
         viewModelScope.launch { recent.used(id) }
     }
 
-    // Which of the songs each playlist has already, by playlist.
-    fun holdings(trackIds: List<String>): Flow<Map<String, Set<String>>> {
-        val parts = trackIds.distinct().chunked(900).map { userDao.playlistHoldings(it) }
-        if (parts.isEmpty()) return flowOf(emptyMap())
-        return combine(parts) { rows -> holdingsByPlaylist(rows.flatMap { part -> part.map { it.playlistId to it.trackId } }) }
-    }
+    // How adding `source` to a playlist would go, counted chunk by chunk
+    // against the playlist's songs.
+    suspend fun check(playlist: PlaylistSummary, source: AddSource): Pair<AddCounts, AddPlan?> = sources.check(playlist.id, source)
 
     // A new playlist with songs in it says where they went, since nothing
     // on screen shows it.
-    fun create(name: String, trackIds: List<String>) {
+    fun create(name: String, trackIds: List<String>, folderId: String? = null) {
         val id = store.create(name, trackIds)
+        if (folderId != null) viewModelScope.launch { folders.place(listOf(PlaylistFolderTree.localKey(id)), folderId) }
         if (trackIds.isNotEmpty()) {
             used(id)
             feedback.show(addedMessage(name.trim(), trackIds.size))
+        }
+    }
+
+    // A new playlist of what `source` brings, each song once.
+    fun create(name: String, source: AddSource) {
+        if (source is AddSource.Ids) return create(name, source.ids.distinct())
+        viewModelScope.launch {
+            val (id, count) = store.createDistinct(name) { emit -> sources.pages(source, emit, store.findsOpen) }
+            used(id)
+            if (count > 0) feedback.show(addedMessage(name.trim(), count))
         }
     }
 
@@ -194,12 +272,27 @@ class PlaylistSheetsViewModel @Inject constructor(
     // Adds the songs, with an Undo that takes them back out.
     fun add(playlist: PlaylistSummary, trackIds: List<String>) {
         used(playlist.id)
-        store.add(playlist.id, trackIds) { rows ->
-            feedback.undoable(addedMessage(playlist.name, rows.size)) { store.removeRows(playlist.id, rows) }
+        store.add(playlist.id, if (playlist.refusesFinds) trackIds.filterNot(::isFind) else trackIds) { rows ->
+            feedback.undoable(addedMessage(playlist.name, rows.count)) { store.undoAdd(playlist.id, rows) }
+        }
+    }
+
+    // Adds what `source` brings a page at a time, each song once (with
+    // `newOnly` only those the playlist does not hold yet), with an Undo.
+    fun add(playlist: PlaylistSummary, source: AddSource, newOnly: Boolean, plan: AddPlan?) {
+        if (source is AddSource.Ids && plan != null) return add(playlist, if (newOnly) plan.fresh else plan.songs)
+        used(playlist.id)
+        viewModelScope.launch {
+            val finds = store.findsOpen && !playlist.refusesFinds
+            val rows = store.addPages(playlist.id, newOnly) { emit -> sources.pages(source, emit, finds) } ?: return@launch
+            feedback.undoable(addedMessage(playlist.name, rows.count)) { store.undoAdd(playlist.id, rows) }
         }
     }
 
     fun saveToServer(id: String) = store.saveToServer(id)
+
+    // How many songs a list holds, for the picker's title.
+    suspend fun countOf(spec: ListSpec): Int? = sources.count(spec)
 
     // Live lists.
 
@@ -219,17 +312,17 @@ class PlaylistSheetsViewModel @Inject constructor(
     }
 
     // A playlist of the songs the live list holds now: a copy, which does
-    // not change with the rules.
+    // not change with the rules, written a page at a time.
     fun copyLive(id: String) {
         viewModelScope.launch {
             val list = liveLists.byId(id) ?: return@launch
-            val songs = liveSongs.now(list)
-            if (songs.isEmpty()) {
-                feedback.show(nothingToCopy(list.name))
+            val count = try {
+                liveSongs.copy(list) { pages -> store.createFrom(list.name, pages) }
+            } catch (e: NotEnoughSpace) {
+                feedback.show(spaceWords(e.doing, e.neededBytes))
                 return@launch
             }
-            store.create(list.name, songs.map { it.id })
-            feedback.show(liveCopyMessage(list.name, songs.size))
+            feedback.show(if (count == 0) nothingToCopy(list.name) else liveCopyMessage(list.name, count))
         }
     }
 
@@ -238,9 +331,9 @@ class PlaylistSheetsViewModel @Inject constructor(
 
     fun export(id: String, uri: Uri) {
         viewModelScope.launch {
-            if (!files.export(id, uri)) {
+            files.export(id, uri)?.let { problem ->
                 Log.w("Octo", "playlist export: could not write the file")
-                feedback.show("Could not export the playlist")
+                feedback.show(problem)
             }
         }
     }
@@ -272,9 +365,9 @@ fun PlaylistSheetsHost(sheets: PlaylistSheets, vm: PlaylistSheetsViewModel = hil
         PopupPager(sheets.pages) { sheet, canGoBack ->
             val back: (() -> Unit)? = if (canGoBack) ({ sheets.pages.back() }) else null
             when (sheet) {
-                is PlaylistSheet.Pick -> PlaylistPickerPage(sheet.trackIds, onBack = back, onDone = sheets::close, vm = vm)
+                is PlaylistSheet.Pick -> PlaylistPickerPage(sheet.source, onBack = back, onDone = sheets::close, vm = vm)
                 is PlaylistSheet.Create -> PopupNameForm("New playlist", "Playlist name", "Create", onBack = back, onDone = { name ->
-                    vm.create(name, sheet.trackIds)
+                    vm.create(name, sheet.trackIds, sheet.folderId)
                     sheets.close()
                 })
                 is PlaylistSheet.Options -> GlassMenuPage(header = { GlassMenuHeading(sheet.name) }) {
@@ -293,7 +386,12 @@ fun PlaylistSheetsHost(sheets: PlaylistSheets, vm: PlaylistSheetsViewModel = hil
                             sheets.close()
                         })
                     }
-                    sheet.keep?.let { tracks -> keepPlaylistItem(sheet.id, tracks)?.let { GlassMenuSwitch(it) } }
+                    if (sheet.keep) keepPlaylistItem(sheet.id)?.let { GlassMenuSwitch(it) }
+                    sheet.placeKey?.let { key ->
+                        GlassMenuAction(OctoIcons.PlaylistFolder, PlaylistFolderWords.MOVE_TO_FOLDER, opensPage = true, onClick = {
+                            sheets.show(PlaylistSheet.MoveToFolder(FolderMoveTarget.Playlists(listOf(key), sheet.name)))
+                        })
+                    }
                     GlassMenuAction(OctoIcons.Share, "Export as M3U", onClick = {
                         exporting = sheet.id
                         sheets.close()
@@ -349,6 +447,50 @@ fun PlaylistSheetsHost(sheets: PlaylistSheets, vm: PlaylistSheetsViewModel = hil
                     vm.deleteLive(sheet.id)
                     sheets.close()
                 }
+                is PlaylistSheet.NewFolder -> PopupNameForm(
+                    PlaylistFolderWords.NEW_FOLDER,
+                    PlaylistFolderWords.FOLDER_NAME,
+                    "Create",
+                    onBack = back,
+                    ready = { PlaylistFolderTree.cleanName(it) != null },
+                    onDone = { name ->
+                        vm.newFolder(name, sheet.parent, sheet.placing, sheet.moving)
+                        sheets.close()
+                    },
+                )
+                is PlaylistSheet.RenameFolder -> PopupNameForm(
+                    PlaylistFolderWords.RENAME_FOLDER,
+                    PlaylistFolderWords.FOLDER_NAME,
+                    "Save",
+                    onBack = back,
+                    initial = sheet.name,
+                    ready = { PlaylistFolderTree.cleanName(it) != null },
+                    onDone = { name ->
+                        vm.renameFolder(sheet.id, name)
+                        sheets.close()
+                    },
+                )
+                is PlaylistSheet.DeleteFolder -> {
+                    val folders by vm.folderView.collectAsStateWithLifecycle()
+                    val parentName = folders.tree.parentOf(sheet.id)?.let { folders.tree.folder(it)?.name }
+                    ConfirmDeleteFolder(sheet.name, parentName, onCancel = back ?: sheets::close) {
+                        vm.deleteFolder(sheet.id)
+                        sheets.close()
+                    }
+                }
+                is PlaylistSheet.MoveToFolder -> MoveToFolderPage(sheet.target, onBack = back, onDone = sheets::close, vm = vm)
+                is PlaylistSheet.AddPlaylists -> AddPlaylistsPage(sheet.folderId, onBack = back, onDone = sheets::close, vm = vm)
+                is PlaylistSheet.FolderOptions -> GlassMenuPage(header = { GlassMenuHeading(sheet.name) }) {
+                    GlassMenuAction(OctoIcons.Rename, PlaylistFolderWords.RENAME, opensPage = true, onClick = {
+                        sheets.show(PlaylistSheet.RenameFolder(sheet.id, sheet.name))
+                    })
+                    GlassMenuAction(OctoIcons.PlaylistFolder, PlaylistFolderWords.MOVE_TO_FOLDER, opensPage = true, onClick = {
+                        sheets.show(PlaylistSheet.MoveToFolder(FolderMoveTarget.Folder(sheet.id, sheet.name)))
+                    })
+                    GlassMenuAction(OctoIcons.Delete, PlaylistFolderWords.DELETE_FOLDER, opensPage = true, destructive = true, onClick = {
+                        sheets.show(PlaylistSheet.DeleteFolder(sheet.id, sheet.name))
+                    })
+                }
             }
         }
     }
@@ -367,43 +509,87 @@ fun PlaylistPickerPage(
     onDone: () -> Unit,
     vm: PlaylistSheetsViewModel = hiltViewModel(),
     start: String? = null,
+) = PlaylistPickerPage(AddSource.Ids(trackIds), onBack, onDone, vm, start)
+
+// The same for songs named by what they are, an album or a playlist say:
+// the title counts them, and a tapped playlist is checked against them a
+// chunk at a time, saying "Checking the playlist" meanwhile.
+@Composable
+fun PlaylistPickerPage(
+    source: AddSource,
+    onBack: (() -> Unit)?,
+    onDone: () -> Unit,
+    vm: PlaylistSheetsViewModel = hiltViewModel(),
+    start: String? = null,
 ) {
     val all by vm.playlists.collectAsStateWithLifecycle()
     val recent by vm.recentIds.collectAsStateWithLifecycle()
-    // A family playlist the listener may only listen to takes no songs.
-    val playlists = remember(all, recent) { recentFirst(all.filterNot { it.family && !it.familyMayAdd }, recent) { it.id } }
-    val holdings by remember(trackIds) { vm.holdings(trackIds) }.collectAsStateWithLifecycle(null)
-    var asking by remember { mutableStateOf<Pair<PlaylistSummary, AddPlan>?>(null) }
+    val folders by vm.folderView.collectAsStateWithLifecycle()
+    // Songs found online among what the add brings: the upkeep lists that
+    // refuse them are left out.
+    val forFind by produceState(vm.findsOpen && (source as? AddSource.Ids)?.ids?.any(::isFind) == true, source) { value = vm.holdsFind(source) }
+    // A playlist the listener may only listen to, or an imported playlist's copy, takes no songs.
+    val offered = remember(all, forFind) { all.filter { it.takesSongs && !(forFind && it.refusesFinds) } }
+    val groups = remember(offered, recent, folders, forFind) {
+        PickerGroups.build(
+            offered,
+            id = { it.id },
+            placeKey = { it.placeKey },
+            name = { it.name },
+            upkeep = { it.upkeep },
+            refusesFind = { it.refusesFinds },
+            recentIds = recent,
+            tree = folders.shown,
+            forFind = forFind,
+        )
+    }
+    var asking by remember { mutableStateOf<Triple<PlaylistSummary, AddCounts, AddPlan?>?>(null) }
     var naming by remember { mutableStateOf(false) }
-    // Whether the `start` playlist has been looked at yet.
+    // A playlist being checked, and the `start` playlist once looked at.
+    var checking by remember { mutableStateOf<PlaylistSummary?>(null) }
     var started by remember { mutableStateOf(start == null) }
-    val add = { playlist: PlaylistSummary, songs: List<String> ->
-        vm.add(playlist, songs)
+    val scope = rememberCoroutineScope()
+    val add = { playlist: PlaylistSummary, newOnly: Boolean, plan: AddPlan? ->
+        vm.add(playlist, source, newOnly, plan)
         onDone()
     }
-    LaunchedEffect(start, all, holdings) {
-        if (started) return@LaunchedEffect
-        val playlist = all.firstOrNull { it.id == start } ?: return@LaunchedEffect
-        val held = holdings ?: return@LaunchedEffect
-        started = true
-        val plan = planAdd(trackIds, held[playlist.id].orEmpty())
-        if (plan.asks) asking = playlist to plan else add(playlist, plan.songs)
+    val tap = { playlist: PlaylistSummary ->
+        checking = playlist
+        scope.launch {
+            val (counts, plan) = vm.check(playlist, source)
+            checking = null
+            if (counts.asks) asking = Triple(playlist, counts, plan) else add(playlist, false, plan)
+        }
+        Unit
     }
-    asking?.let { (playlist, plan) ->
+    LaunchedEffect(start, offered) {
+        if (started) return@LaunchedEffect
+        val playlist = offered.firstOrNull { it.id == start } ?: return@LaunchedEffect
+        started = true
+        tap(playlist)
+    }
+    asking?.let { (playlist, counts, plan) ->
         ConfirmAgain(
-            addAgainQuestion(playlist.name, plan),
-            plan,
+            addAgainQuestion(playlist.name, counts),
+            counts,
             onCancel = { asking = null },
-            onAddAll = { add(playlist, plan.songs) },
-            onAddNew = { add(playlist, plan.fresh) },
+            onAddAll = { add(playlist, false, plan) },
+            onAddNew = { add(playlist, true, plan) },
         )
         return
     }
-    if (!started) {
+    if (!started || checking != null) {
         GlassMenuPage { GlassMenuNote("Checking the playlist") }
         return
     }
-    val title = if (trackIds.size == 1) "Add to playlist" else "Add ${songs(trackIds.size)} to a playlist"
+    val size by produceState<Int?>((source as? AddSource.Ids)?.ids?.distinct()?.size, source) {
+        if (source is AddSource.Spec) value = vm.countOf(source.spec)
+    }
+    val title = when (val n = size) {
+        1 -> "Add to playlist"
+        null -> "Add to a playlist"
+        else -> "Add ${songs(n)} to a playlist"
+    }
     Column(Modifier.width(MenuWidth).padding(6.dp)) {
         if (onBack != null) GlassMenuBack(title, onBack) else GlassMenuHeading(title)
         LazyColumn(Modifier.weight(1f, fill = false)) {
@@ -413,7 +599,7 @@ fun PlaylistPickerPage(
                         "Playlist name",
                         "Create",
                         onDone = { name ->
-                            vm.create(name, trackIds.distinct())
+                            vm.create(name, source)
                             onDone()
                         },
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
@@ -422,10 +608,16 @@ fun PlaylistPickerPage(
                     GlassMenuAction(OctoIcons.AddToLibrary, "New playlist", onClick = { naming = true })
                 }
             }
-            items(playlists, key = { it.id }) { playlist ->
-                PickLine(playlist) {
-                    val plan = planAdd(trackIds, holdings?.get(playlist.id).orEmpty())
-                    if (plan.asks) asking = playlist to plan else add(playlist, plan.songs)
+            groups.forEachIndexed { index, group ->
+                item(key = "head:${group.kind}:${group.title.orEmpty()}") {
+                    val title = group.title
+                    when {
+                        title != null -> GlassMenuTitle(title)
+                        index > 0 -> GlassMenuSeparator()
+                    }
+                }
+                items(group.items, key = { "${group.kind}:${group.title.orEmpty()}:${it.id}" }) { playlist ->
+                    PickLine(playlist) { tap(playlist) }
                 }
             }
         }
@@ -461,17 +653,17 @@ private fun PickLine(playlist: PlaylistSummary, onClick: () -> Unit) {
 // Asks before songs go on a playlist that has them already. With some new
 // ones among them, the choice is all of them or only the new ones.
 @Composable
-private fun ConfirmAgain(question: String, plan: AddPlan, onCancel: () -> Unit, onAddAll: () -> Unit, onAddNew: () -> Unit) {
-    if (plan.offersNewOnly) {
+private fun ConfirmAgain(question: String, counts: AddCounts, onCancel: () -> Unit, onAddAll: () -> Unit, onAddNew: () -> Unit) {
+    if (counts.offersNewOnly) {
         Column(Modifier.width(MenuWidth).padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 18.dp)) {
             Text(question, style = OctoType.body, color = OctoColors.TextPrimary, maxLines = 3, overflow = TextOverflow.Ellipsis)
             Row(Modifier.padding(top = 18.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AccentButton(ADD_NEW_ONES, onClick = onAddNew)
-                GlazeButton(addAgainChoice(plan), onClick = onAddAll)
+                GlazeButton(addAgainChoice(counts), onClick = onAddAll)
             }
         }
     } else {
-        PopupQuestion(question, null, addAgainChoice(plan), onConfirm = onAddAll, onCancel = onCancel)
+        PopupQuestion(question, null, addAgainChoice(counts), onConfirm = onAddAll, onCancel = onCancel)
     }
 }
 

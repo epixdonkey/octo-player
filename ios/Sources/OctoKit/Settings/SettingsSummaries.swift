@@ -33,9 +33,18 @@ public enum SettingsSummaries {
         return (n < 0 ? "-" : "") + out
     }
 
+    /// What plays between songs, as the front page says it: "Automix", "Crossfade 8 s" or "Gapless".
+    public static func betweenSongs(_ prefs: PlayerPrefs) -> String {
+        switch prefs.betweenSongs {
+        case .gapless: "Gapless"
+        case .crossfade: "Crossfade \(prefs.crossfadeSeconds) s"
+        case .automix: "Automix"
+        }
+    }
+
     public static func playback(_ prefs: PlayerPrefs) -> String {
         line(
-            prefs.crossfade ? "Crossfade \(prefs.crossfadeSeconds) s" : "Gapless",
+            betweenSongs(prefs),
             prefs.paceIsDefault ? nil : Pace.speedLabel(prefs.speed),
             prefs.autoplay ? "Autoplay" : nil,
             prefs.skipSilence ? "Skip silence" : nil
@@ -68,7 +77,7 @@ public enum SettingsSummaries {
 
     /// The phone's part of the account card.
     public static func phoneLine(_ access: PhoneAccess, songs: Int) -> String {
-        access == .granted ? count(songs, one: "song", many: "songs") + " on this phone" : "Allow access to the music on this phone"
+        access == .granted ? count(songs, one: "song", many: "songs") + " on this phone" : "Allow music on this phone"
     }
 
     /// How long ago something happened, in words: "Just now", "5 min ago". Times are in ms.
@@ -87,10 +96,12 @@ public enum SettingsSummaries {
         return "Synced " + ago.prefix(1).lowercased() + ago.dropFirst()
     }
 
-    /// How the server is doing, for the account card and its category: syncing, or where it is
-    /// reached from and how fresh the copy is. Place is nil when the server has one address.
-    public static func serverStatus(syncing: Bool, place: ServerPlace?, syncedAt: Int64?, now: Int64) -> String {
-        if syncing { return "Syncing…" }
+    /// How the server is doing, for the account card and its category: syncing (how far, while a
+    /// copy `run` can tell), or where it is reached from and how fresh the copy is. Place is nil
+    /// when the server has one address.
+    public static func serverStatus(syncing: Bool, place: ServerPlace?, syncedAt: Int64?, now: Int64, run: CopyRunState? = nil) -> String {
+        if let run { return CopyWords.status(run) }
+        if syncing { return "Syncing" }
         let where_: String? = switch place {
         case .home: "Connected at home"
         case .away: "Connected away"

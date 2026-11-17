@@ -35,8 +35,8 @@ import app.winters.octo.desktop.library.totalLengthText
 import app.winters.octo.desktop.nav.Page
 import app.winters.octo.desktop.ui.AlbumMenu
 import app.winters.octo.desktop.ui.EmptyLine
-import app.winters.octo.desktop.ui.FailedLine
-import app.winters.octo.desktop.ui.LoadingLine
+import app.winters.octo.desktop.ui.LibraryReadFailed
+import app.winters.octo.desktop.ui.LibraryReadHero
 import app.winters.octo.desktop.ui.LocalPointer
 import app.winters.octo.desktop.ui.MediaCard
 import app.winters.octo.desktop.ui.PageSide
@@ -47,6 +47,7 @@ import app.winters.octo.design.DesktopType
 import app.winters.octo.design.PageSize
 import app.winters.octo.design.Space
 import app.winters.octo.design.IconAction
+import app.winters.octo.design.IconSize
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
@@ -59,10 +60,11 @@ import kotlinx.coroutines.launch
 fun WithLibrary(app: AppState, content: @Composable (LibraryIndex) -> Unit) {
     val store = app.library ?: return
     val state by store.state.collectAsState()
+    val progress by store.progress.collectAsState()
     when (val s = state) {
         // In from the page's side, where the page's own words start.
-        LibraryState.Idle, LibraryState.Loading -> LoadingLine("Reading your library", Modifier.padding(horizontal = PageSide))
-        is LibraryState.Failed -> FailedLine(s.message, store::load, Modifier.padding(horizontal = PageSide))
+        LibraryState.Idle, LibraryState.Loading -> LibraryReadHero(progress, Modifier.padding(horizontal = PageSide))
+        is LibraryState.Failed -> LibraryReadFailed(s.message, s.step, s.done, store::load, Modifier.padding(horizontal = PageSide))
         is LibraryState.Ready -> content(s.index)
     }
 }
@@ -79,8 +81,8 @@ fun <T> Shelf(title: String, items: List<T>, key: (T) -> Any, card: @Composable 
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Txt(title, OctoType.headline, modifier = Modifier.weight(1f))
-            IconAction(OctoIcons.Back, "Scroll back", { scope.launch { if (still) state.scrollBy(-step) else state.animateScrollBy(-step) } }, size = 30.dp, iconSize = 18.dp, enabled = state.canScrollBackward)
-            IconAction(OctoIcons.Forward, "Scroll on", { scope.launch { if (still) state.scrollBy(step) else state.animateScrollBy(step) } }, size = 30.dp, iconSize = 18.dp, enabled = state.canScrollForward)
+            IconAction(OctoIcons.Back, "Scroll back", { scope.launch { if (still) state.scrollBy(-step) else state.animateScrollBy(-step) } }, size = 30.dp, iconSize = IconSize.Toolbar, enabled = state.canScrollBackward)
+            IconAction(OctoIcons.Forward, "Scroll on", { scope.launch { if (still) state.scrollBy(step) else state.animateScrollBy(step) } }, size = 30.dp, iconSize = IconSize.Toolbar, enabled = state.canScrollForward)
         }
         LazyRow(state = state, contentPadding = PaddingValues(horizontal = 0.dp)) {
             items(items, key = key) { item -> Box(Modifier.width(ShelfCardWidth)) { card(item) } }

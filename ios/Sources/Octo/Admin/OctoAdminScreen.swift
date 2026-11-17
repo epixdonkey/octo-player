@@ -1,5 +1,6 @@
 import OctoKit
 import SwiftUI
+import UIKit
 
 /// What Octo is doing, from its own admin pages on the home network: its health and its
 /// services', the stations and how far they have learned, the latest downloads, and where
@@ -80,8 +81,16 @@ struct OctoAdminScreen: View {
         sectionTitle("Health", extra: 8)
         section(model.status) { status in
             HealthRow(name: "Octo", health: status.octo)
-            ForEach(status.services, id: \.key) { service in HealthRow(name: serviceName(service.key), health: service.health) }
+            ForEach(status.services, id: \.key) { service in
+                HealthRow(name: serviceName(service.key), health: service.health, onPass: passAction(model, service))
+            }
         }
+    }
+
+    /// Opens the full admin pages at the card a service's row leads to, or nil when it leads nowhere.
+    private func passAction(_ model: OctoAdminModel, _ service: AdminService) -> (() -> Void)? {
+        guard let card = dashboardSection(service.key, service.health) else { return nil }
+        return { if let url = model.cardUrl(card) { openURL(url) } }
     }
 
     // MARK: Stations
@@ -136,8 +145,9 @@ struct OctoAdminScreen: View {
                 note("Nothing downloaded yet")
             } else {
                 let now = epochNowMs()
+                let base = adminBase(model)
                 ForEach(Array((showAll ? records : Array(records.prefix(30))).enumerated()), id: \.offset) { _, record in
-                    DownloadRow(record: record, nowMs: now)
+                    DownloadRow(record: record, nowMs: now, client: session.client, base: base)
                 }
                 if records.count > 30 {
                     GlazeButton(showAll ? "Show fewer" : "Show all") { showAll.toggle() }
@@ -146,6 +156,11 @@ struct OctoAdminScreen: View {
                 }
             }
         }
+    }
+
+    /// Where the admin pages answer, once found.
+    private func adminBase(_ model: OctoAdminModel) -> URL? {
+        if case .found(let base) = model.place { base } else { nil }
     }
 
     // MARK: Library
@@ -192,39 +207,53 @@ struct OctoAdminScreen: View {
     }
 }
 
-/// One service's health: its dot, its name and what it says.
+/// One service's health: its dot, its name and what it says. With `onPass`, a quiet "Pass on
+/// the dashboard" under the words, lined up with them, opens the full admin pages where the fix is.
 private struct HealthRow: View {
     let name: String
     let health: AdminHealth
+    var onPass: (() -> Void)?
+
+    private static let dotSize: CGFloat = 8
+    private static let dotGap: CGFloat = 14
+    /// How far a QuietButton's words sit inside its edge.
+    private static let quietInset: CGFloat = 10
 
     var body: some View {
         let dot = healthDot(health)
-        HStack(alignment: .top, spacing: 14) {
-            Circle()
-                .fill(color(dot))
-                .frame(width: 8, height: 8)
-                .padding(.top, 6)
-                .accessibilityLabel(word(dot))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.octoBodySmall).foregroundStyle(dot == .notSetUp ? OctoColor.textMuted : OctoColor.textPrimary)
-                let detail = dot == .notSetUp ? "Not set up" : health.detail
-                if !detail.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text(detail).font(.octoCaption).foregroundStyle(OctoColor.textMuted).lineLimit(3)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: Self.dotGap) {
+                Circle()
+                    .fill(color(dot))
+                    .frame(width: Self.dotSize, height: Self.dotSize)
+                    .padding(.top, 6)
+                    .accessibilityLabel(word(dot))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.octoBodySmall).foregroundStyle(dot == .notSetUp ? OctoColor.textMuted : OctoColor.textPrimary)
+                    let detail = dot == .notSetUp ? "Not set up" : health.detail
+                    if !detail.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Text(detail).font(.octoCaption).foregroundStyle(OctoColor.textMuted).lineLimit(3)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            if let onPass {
+                // Its own element, so the row's words stay one and the button stays a button.
+                QuietButton(passOnDashboardText, action: onPass)
+                    .padding(.leading, Self.dotSize + Self.dotGap - Self.quietInset)
+            }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
-        .accessibilityElement(children: .combine)
     }
 
-    private func color(_ dot: HealthDot) -> Color {
+    private func color(_ dot: HealthDot) -> AnyShapeStyle {
         switch dot {
-        case .ok: Color(hex: 0x8FBFA0)
-        case .warning: Color(hex: 0xE3B35B)
-        case .down: OctoColor.error
-        case .notSetUp: OctoColor.accent.opacity(0.3)
+        case .ok: AnyShapeStyle(Color(hex: 0x8FBFA0))
+        case .warning: AnyShapeStyle(Color(hex: 0xE3B35B))
+        case .down: AnyShapeStyle(OctoColor.error)
+        case .notSetUp: AnyShapeStyle(OctoColor.accent.opacity(0.3))
         }
     }
 
@@ -242,13 +271,17 @@ private struct HealthRow: View {
 private struct DownloadRow: View {
     let record: DownloadRecord
     let nowMs: Int64
+    /// The server in use, which the server's own covers come through.
+    let client: SubsonicClient?
+    /// Where the admin pages answer.
+    let base: URL?
 
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6).fill(OctoColor.backgroundTertiary)
                 if let cover = record.coverArtUrl, let url = URL(string: cover) {
-                    AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color.clear }
+                    DownloadCover(url: url, client: client, base: base)
                         .accessibilityHidden(true)
                 }
             }
@@ -265,6 +298,34 @@ private struct DownloadRow: View {
         }
         .padding(.horizontal, 20)
         .frame(minHeight: 56)
+    }
+}
+
+/// A fetched song's cover. One at the server's own addresses, or where its admin pages answer,
+/// comes through the server's connection (its headers and its sign-in page's cookies, a sign-in
+/// page refused, never shown); any other comes from where it is, with nothing of the server's.
+private struct DownloadCover: View {
+    let url: URL
+    let client: SubsonicClient?
+    let base: URL?
+    @State private var picture: UIImage?
+
+    var body: some View {
+        if let client, isServerPicture(url, client: client, adminBase: base) {
+            Color.clear
+                .overlay {
+                    if let picture { Image(uiImage: picture).resizable().scaledToFill() }
+                }
+                .task(id: url) { picture = await Self.load(url, client: client) }
+        } else {
+            AsyncImage(url: url) { image in image.resizable().scaledToFill() } placeholder: { Color.clear }
+        }
+    }
+
+    private static func load(_ url: URL, client: SubsonicClient) async -> UIImage? {
+        guard let (data, _) = try? await ServerExchange.media(for: URLRequest(url: url), client: client, endpoint: "downloads/cover")
+        else { return nil }
+        return UIImage(data: data)
     }
 }
 

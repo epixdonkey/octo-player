@@ -5,10 +5,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class PlaylistsLeadTest {
-    // The three lines that led the list are now one plus on the header.
+    // The lines that led the list are now one plus on the header.
     @Test
-    fun thePlusMakesAPlaylistALiveListOrImportsOne() {
-        assertEquals(listOf("New playlist", "New live list", "Import a playlist file"), PlaylistsAdd.entries.map { it.label })
+    fun thePlusMakesAPlaylistAFolderALiveListOrImportsOne() {
+        assertEquals(listOf("New playlist", "New folder", "New live list", "Import a playlist file"), PlaylistsAdd.entries.map { it.label })
         assertEquals("M3U or M3U8", PlaylistsAdd.Import.detail)
     }
 
@@ -24,6 +24,8 @@ class PlaylistsLeadTest {
         assertEquals(listOf("12 songs", "45 min", "3 of 12 downloaded"), listHeaderFacts(12, 45 * 60_000L, listOf("3 of 12 downloaded")))
         // An empty list has no length to give.
         assertEquals(listOf("0 songs"), listHeaderFacts(0, 0, emptyList()))
+        // Before the count is known, only what else the page says shows.
+        assertEquals(listOf("With “live”"), listHeaderFacts(null, 0, listOf("With “live”")))
     }
 
     @Test

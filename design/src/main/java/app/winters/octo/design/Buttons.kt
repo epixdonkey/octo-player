@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +66,11 @@ class ButtonLook internal constructor(
     val ring: Float get() = ringState.value
 }
 
+// Whether a focused button shows its accent ring. The desktop shows it only
+// while the keyboard is in use, since a click focuses a button there too;
+// the phone always does.
+val LocalRingsShown = compositionLocalOf { true }
+
 // How a button answers the pointer, the finger and the keyboard, from its
 // interactions: pressed, it shrinks to `pressScale` and darkens; under the
 // pointer, it rises by `lift` and lightens; focused by the keyboard, it
@@ -91,7 +97,7 @@ fun rememberButtonLook(
     )
     val hover = animateFloatAsState(if (hovered) 0.10f else 0f, octoTween(motion, OctoDuration.Fill), label = "button hover")
     val press = animateFloatAsState(if (pressed) 0.10f else 0f, octoTween(motion, OctoDuration.Press), label = "button shade")
-    val ring = animateFloatAsState(if (focused) 1f else 0f, octoTween(motion, OctoDuration.Neutral), label = "button ring")
+    val ring = animateFloatAsState(if (focused && LocalRingsShown.current) 1f else 0f, octoTween(motion, OctoDuration.Neutral), label = "button ring")
     return ButtonLook(scale, rise, hover, press, ring, pressed, hovered)
 }
 
@@ -108,27 +114,30 @@ fun rememberPressSqueeze(interaction: InteractionSource): State<Float> {
     )
 }
 
-// Moves a button by its look: pressed in, risen, and ringed when focused.
-fun Modifier.buttonMotion(look: ButtonLook, shape: Shape): Modifier = this
+// Moves a button by its look: pressed in, risen, and ringed in `ring` when
+// focused.
+fun Modifier.buttonMotion(look: ButtonLook, shape: Shape, ring: Color): Modifier = this
     .graphicsLayer {
         scaleX = look.scale
         scaleY = look.scale
         translationY = -look.lift.toPx()
     }
-    .focusRing(shape, { look.ring })
+    .focusRing(shape, { look.ring }, ring)
 
-// The hover and press shades over a button's fill: white under the
-// pointer, black under the finger.
+// The hover and press shades over a button's fill: the theme's ink under
+// the pointer, its shadow under the finger.
 @Composable
 fun BoxScope.ButtonShades(look: ButtonLook, shape: Shape) {
+    val hoverTint = OctoColors.TextPrimary
+    val pressTint = shadowColor(1f)
     Box(
         Modifier
             .matchParentSize()
             .clip(shape)
             // Read while drawing, so the shades fade without recomposing.
             .drawBehind {
-                drawRect(Color.White.copy(alpha = look.hoverShade))
-                drawRect(Color.Black.copy(alpha = look.pressShade))
+                drawRect(hoverTint.copy(alpha = look.hoverShade))
+                drawRect(pressTint.copy(alpha = pressTint.alpha * look.pressShade))
             },
     )
 }

@@ -1,12 +1,12 @@
 import OctoKit
 import SwiftUI
 
-private let chip = Color.white.opacity(0.08)
-private let thread = Color.white.opacity(0.10)
-private let track = Color.white.opacity(0.14)
-private let losslessChip = Color.white.opacity(0.16)
-private let card = Color.white.opacity(0.05)
-private let liveFill = Color.white.opacity(0.14)
+private var chip: some ShapeStyle { OctoColor.textPrimary.opacity(0.08) }
+private var thread: some ShapeStyle { OctoColor.textPrimary.opacity(0.10) }
+private var track: some ShapeStyle { OctoColor.textPrimary.opacity(0.14) }
+private var losslessChip: some ShapeStyle { OctoColor.textPrimary.opacity(0.16) }
+private var card: some ShapeStyle { OctoColor.textPrimary.opacity(0.05) }
+private var liveFill: some ShapeStyle { OctoColor.textPrimary.opacity(0.14) }
 
 /// The server downloads sheet, over everything: every download the server is doing for this person
 /// or did lately, each opening to its log, and Find songs.
@@ -79,7 +79,7 @@ private struct DownloadListPage: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(serverDownloadsTitle)
                     .font(.octoSection)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(OctoColor.textPrimary)
                     .accessibilityAddTraits(.isHeader)
                 let summary = drawerSummary(rows)
                 if !summary.isEmpty {
@@ -102,13 +102,19 @@ private struct DownloadListPage: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(rows) { row in
-                        DownloadLine(row: row) {
-                            // A higher quality copy still waiting its turn has no log yet; a finished
-                            // one without its log can still be looked for again.
-                            if let key = row.logKey {
-                                model.showLog(key)
-                            } else if row.finished, let id = row.findId {
-                                model.find(id, title: row.title)
+                        let keep = keepAnywayLabel(row)
+                        VStack(alignment: .leading, spacing: 0) {
+                            DownloadLine(row: row, keepBelow: keep != nil) {
+                                // A higher quality copy still waiting its turn has no log yet; a
+                                // finished one without its log can still be looked for again.
+                                if let key = row.logKey {
+                                    model.showLog(key)
+                                } else if row.finished, let id = row.findId {
+                                    model.find(id, title: row.title)
+                                }
+                            }
+                            if let keep, let key = row.logKey {
+                                KeepAnywayLine(label: keep, keeping: model.watch.keeping[key]) { model.keepAnyway(key) }
                             }
                         }
                     }
@@ -121,17 +127,19 @@ private struct DownloadListPage: View {
 
 private struct DownloadLine: View {
     let row: DownloadRow
+    /// A Keep anyway line follows, so the row's own bottom edge sits close above it.
+    var keepBelow = false
     let open: () -> Void
 
     var body: some View {
         Button(action: open) {
-            HStack(spacing: 14) {
-                Cover(id: row.coverArt, size: 48, radius: 8)
+            HStack(spacing: lineGap) {
+                Cover(id: row.coverArt, size: lineCover, radius: 8)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
                         Text(row.title)
                             .font(.octoBody)
-                            .foregroundStyle(.white)
+                            .foregroundStyle(OctoColor.textPrimary)
                             .lineLimit(1)
                         if let label = kindLabel(row.kind) { KindMark(text: label) }
                     }
@@ -140,20 +148,28 @@ private struct DownloadLine: View {
                     }
                     Text(row.status)
                         .font(.octoCaption)
-                        .foregroundStyle(row.phase == .failed ? DiscoveryStyle.orange : OctoColor.textMuted)
+                        .foregroundStyle(row.phase == .failed ? AnyShapeStyle(DiscoveryStyle.orange) : AnyShapeStyle(OctoColor.textMuted))
                         .lineLimit(2)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                if !row.finished {
-                    DownloadProgressRing(fraction: row.fraction, size: 22)
+                if waitsForYou(row) {
+                    // Waiting for the person: the accent dot that says something needs you, centered
+                    // in the ring's place.
+                    Circle()
+                        .fill(OctoColor.accent)
+                        .frame(width: 8, height: 8)
+                        .frame(width: lineMark, height: lineMark)
+                } else if !row.finished {
+                    DownloadProgressRing(fraction: row.fraction, size: lineMark)
                 } else if row.phase == .done {
                     Image(systemName: "arrow.down.circle.fill").font(.system(size: 18)).foregroundStyle(OctoColor.textSecondary)
                 } else {
                     Image(systemName: "info.circle").font(.system(size: 18)).foregroundStyle(DiscoveryStyle.orange)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 8)
+            .padding(.horizontal, lineEdge)
+            .padding(.top, 8)
+            .padding(.bottom, keepBelow ? 2 : 8)
             .contentShape(Rectangle())
         }
         .buttonStyle(SqueezeStyle())
@@ -161,6 +177,46 @@ private struct DownloadLine: View {
         .accessibilityLabel("\(row.title), \(row.artist)")
         .accessibilityValue(row.status)
         .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// A list row's edge, its cover, the gap before its words, and the ring or mark at its end.
+private let lineEdge: CGFloat = 20
+private let lineCover: CGFloat = 48
+private let lineGap: CGFloat = 14
+private let lineMark: CGFloat = 22
+
+/// How far a QuietButton's words sit inside its edge.
+private let quietInset: CGFloat = 10
+
+/// A held download's Keep anyway, under its row's words and lined up with them, set like the
+/// artist line above it: faint while it is sent, and the server's words under it when it said no,
+/// wrapping where the row's words do, short of the ring. The row above never moves for it.
+private struct KeepAnywayLine: View {
+    let label: String
+    let keeping: Keeping?
+    let keep: () -> Void
+
+    var body: some View {
+        let sending = keeping?.sending == true
+        VStack(alignment: .leading, spacing: 0) {
+            QuietButton(label, font: .octoBodySmall, action: keep)
+                .disabled(sending)
+                .opacity(sending ? OctoInkColor.disabled : 1)
+                // The button's own inset pulled back, so its words start where the row's do.
+                .padding(.leading, -quietInset)
+            if let error = keeping?.error {
+                Text(error)
+                    .font(.octoCaption)
+                    .foregroundStyle(DiscoveryStyle.orange)
+                    .lineLimit(2)
+                    .padding(.bottom, 6)
+            }
+        }
+        .padding(.leading, lineEdge + lineCover + lineGap)
+        .padding(.trailing, lineGap + lineMark + lineEdge)
+        .padding(.bottom, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -187,10 +243,10 @@ struct DownloadProgressRing: View {
         if let fraction {
             let stroke = size * 0.12
             ZStack {
-                Circle().stroke(Color.white.opacity(0.18), lineWidth: stroke)
+                Circle().stroke(OctoColor.textPrimary.opacity(0.18), lineWidth: stroke)
                 Circle()
                     .trim(from: 0, to: min(1, max(0, fraction)))
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+                    .stroke(OctoColor.textPrimary, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
             .padding(stroke / 2)
@@ -217,11 +273,22 @@ private struct DownloadLogPage: View {
     var body: some View {
         let log = model.logWatch.row
         let row = model.watch.rows.first { $0.logKey == key } ?? log.map { rowOf($0) }
+        // Offered while the log's own reading of the download says so.
+        let keep = log.flatMap { keepAnywayLabel(rowOf($0)) }
+        let keeping = model.watch.keeping[key]
         let events = log?.event ?? []
         let running = row?.finished == false
+        // Waiting for the person, its newest line is still.
+        let busy = running && !(row.map(waitsForYou) ?? false)
         SheetBar(back: "Back to \(serverDownloadsTitle)", onBack: model.showList, title: "Download") {
-            if let row, let id = row.findId {
+            if let row, let id = logFindId(row) {
                 QuietButton(findSongsTitle) { model.find(id, title: row.title, from: key) }
+            }
+            if let keep {
+                let sending = keeping?.sending == true
+                QuietButton(keep) { model.keepAnyway(key) }
+                    .disabled(sending)
+                    .opacity(sending ? OctoInkColor.disabled : 1)
             }
             if let row, row.finished {
                 QuietButton("Clear") {
@@ -229,6 +296,16 @@ private struct DownloadLogPage: View {
                     model.showList()
                 }
             }
+        }
+        // The server's words right under the bar whose Keep anyway it said no to.
+        if keep != nil, let refusal = keeping?.error {
+            Text(refusal)
+                .font(.octoCaption)
+                .foregroundStyle(DiscoveryStyle.orange)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
         }
         // The song and where it is stay put; only the steps scroll.
         if let row { LogHead(row: row, events: events) }
@@ -248,7 +325,7 @@ private struct DownloadLogPage: View {
                             DownloadProgressRing(fraction: nil, size: 22)
                         }
                         ForEach(Array(events.enumerated()), id: \.offset) { index, line in
-                            LogLine(line: line, last: index == events.count - 1, live: running && index == events.count - 1)
+                            LogLine(line: line, last: index == events.count - 1, live: busy && index == events.count - 1)
                                 .id(index)
                         }
                     }
@@ -298,7 +375,7 @@ private struct LogHead: View {
             HStack(spacing: 14) {
                 Cover(id: row.coverArt, size: 56, radius: 10)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title).font(.octoHeadline).foregroundStyle(.white).lineLimit(2)
+                    Text(row.title).font(.octoHeadline).foregroundStyle(OctoColor.textPrimary).lineLimit(2)
                     let by = [row.artist, row.album ?? ""].filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                     if !by.isEmpty {
                         Text(by.joined(separator: " · ")).font(.octoBodySmall).foregroundStyle(OctoColor.textSecondary).lineLimit(2)
@@ -309,7 +386,7 @@ private struct LogHead: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(row.status)
                     .font(.octoBodySmall)
-                    .foregroundStyle(row.phase == .failed ? DiscoveryStyle.orange : .white)
+                    .foregroundStyle(row.phase == .failed ? AnyShapeStyle(DiscoveryStyle.orange) : AnyShapeStyle(OctoColor.textPrimary))
                 let facts = [row.quality, row.source, kindLabel(row.kind)].compactMap { $0 }
                 if !facts.isEmpty {
                     HStack(spacing: 6) {
@@ -331,7 +408,8 @@ private struct LogHead: View {
 }
 
 /// The four steps as a strip: done ones filled, the one it is on filling with the file while it
-/// downloads (breathing while nobody can tell how far), and the ones still to come faint.
+/// downloads (breathing while nobody can tell how far, still while it waits for the person), and
+/// the ones still to come faint.
 private struct StepsStrip: View {
     let row: DownloadRow
     let at: Int
@@ -339,7 +417,7 @@ private struct StepsStrip: View {
 
     var body: some View {
         let failed = row.phase == .failed
-        let breathes = !row.finished && row.fraction == nil && !(calm)
+        let breathes = !row.finished && row.fraction == nil && !waitsForYou(row) && !(calm)
         TimelineView(.animation(paused: !breathes)) { context in
             let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.8) / 0.9
             let pulse = breathes ? 0.45 + 0.55 * (t <= 1 ? t : 2 - t) : 1
@@ -347,7 +425,8 @@ private struct StepsStrip: View {
                 ForEach(DownloadStep.allCases, id: \.self) { step in
                     let index = step.rawValue
                     let target: Double = index < at ? 1 : index > at ? 0 : failed ? 1 : row.phase == .downloading ? (row.fraction ?? 0.5) : 0.5
-                    let fill: Color = failed && index == at ? DiscoveryStyle.orange : row.phase == .done ? DiscoveryStyle.green : .white
+                    let fill: AnyShapeStyle = failed && index == at ? AnyShapeStyle(DiscoveryStyle.orange)
+                        : row.phase == .done ? AnyShapeStyle(DiscoveryStyle.green) : AnyShapeStyle(OctoColor.textPrimary)
                     let alpha = index == at && !row.finished ? pulse : 1
                     VStack(alignment: .leading, spacing: 5) {
                         GeometryReader { box in
@@ -361,9 +440,9 @@ private struct StepsStrip: View {
                         Text(step.label)
                             .font(.octoCaption)
                             .lineLimit(1)
-                            .foregroundStyle(failed && index == at ? DiscoveryStyle.orange
-                                : index == at && !row.finished ? Color.white
-                                : index < at || row.phase == .done ? OctoColor.textSecondary : OctoColor.textMuted)
+                            .foregroundStyle(failed && index == at ? AnyShapeStyle(DiscoveryStyle.orange)
+                                : index == at && !row.finished ? AnyShapeStyle(OctoColor.textPrimary)
+                                : index < at || row.phase == .done ? AnyShapeStyle(OctoColor.textSecondary) : AnyShapeStyle(OctoColor.textMuted))
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -387,9 +466,9 @@ private struct LogLine: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 0) {
                 ZStack {
-                    Circle().fill(live ? liveFill : markFill(mark))
+                    Circle().fill(live ? AnyShapeStyle(liveFill) : markFill(mark))
                     if live && mark != .done && mark != .failed {
-                        ProgressView().controlSize(.mini).tint(.white)
+                        ProgressView().controlSize(.mini).tint(OctoColor.textPrimary)
                     } else {
                         Image(systemName: markIcon(mark))
                             .font(.system(size: 11, weight: .semibold))
@@ -404,7 +483,7 @@ private struct LogLine: View {
                 HStack(alignment: .top, spacing: 0) {
                     Text(line.text)
                         .font(.system(size: 14, weight: live ? .semibold : .regular))
-                        .foregroundStyle(mark == .failed ? DiscoveryStyle.orange : .white)
+                        .foregroundStyle(mark == .failed ? AnyShapeStyle(DiscoveryStyle.orange) : AnyShapeStyle(OctoColor.textPrimary))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 2)
                     Text(logTime(line.at))
@@ -440,19 +519,19 @@ private struct LogLine: View {
         }
     }
 
-    private func markTint(_ mark: LogMark) -> Color {
+    private func markTint(_ mark: LogMark) -> AnyShapeStyle {
         switch mark {
-        case .done: DiscoveryStyle.green
-        case .failed: DiscoveryStyle.orange
-        default: OctoColor.textSecondary
+        case .done: AnyShapeStyle(DiscoveryStyle.green)
+        case .failed: AnyShapeStyle(DiscoveryStyle.orange)
+        default: AnyShapeStyle(OctoColor.textSecondary)
         }
     }
 
-    private func markFill(_ mark: LogMark) -> Color {
+    private func markFill(_ mark: LogMark) -> AnyShapeStyle {
         switch mark {
-        case .done: DiscoveryStyle.green.opacity(0.16)
-        case .failed: DiscoveryStyle.orange.opacity(0.16)
-        default: chip
+        case .done: AnyShapeStyle(DiscoveryStyle.green.opacity(0.16))
+        case .failed: AnyShapeStyle(DiscoveryStyle.orange.opacity(0.16))
+        default: AnyShapeStyle(chip)
         }
     }
 }
@@ -533,7 +612,7 @@ private struct FindSongsPage: View {
                 if let line = takeLine(found?.song.take) {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "info.circle").font(.system(size: 14)).foregroundStyle(OctoColor.textSecondary)
-                        Text(line).font(.octoCaption).foregroundStyle(.white)
+                        Text(line).font(.octoCaption).foregroundStyle(OctoColor.textPrimary)
                     }
                     .padding(.bottom, 8)
                 }
@@ -585,7 +664,7 @@ private struct FindHead: View {
         HStack(spacing: 14) {
             Cover(id: song?.coverArt ?? id, size: 64, radius: 10)
             VStack(alignment: .leading, spacing: 2) {
-                Text(song.flatMap { $0.title.isEmpty ? nil : $0.title } ?? title).font(.octoHeadline).foregroundStyle(.white)
+                Text(song.flatMap { $0.title.isEmpty ? nil : $0.title } ?? title).font(.octoHeadline).foregroundStyle(OctoColor.textPrimary)
                 if let artist = song?.artist, !artist.isEmpty {
                     Text(artist).font(.octoBodySmall).foregroundStyle(OctoColor.textSecondary)
                 }
@@ -594,7 +673,7 @@ private struct FindHead: View {
         if let song {
             VStack(alignment: .leading, spacing: 2) {
                 if let owned = ownedCopyText(quality: song.quality, size: song.size) {
-                    Text(owned).font(.octoBodySmall).foregroundStyle(.white)
+                    Text(owned).font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary)
                 }
                 Text(song.libraryId != nil ? findReplaces(asksFirst: asksFirst) : findDownloadsText)
                     .font(.octoCaption)
@@ -670,10 +749,10 @@ private struct CopyLine: View {
                         let lossless = isLosslessCopy(copy)
                         Text(badge)
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(lossless ? Color.white : OctoColor.textSecondary)
+                            .foregroundStyle(lossless ? AnyShapeStyle(OctoColor.textPrimary) : AnyShapeStyle(OctoColor.textSecondary))
                             .lineLimit(1)
                             .padding(.horizontal, 6)
-                            .background(lossless ? losslessChip : chip, in: RoundedRectangle(cornerRadius: 4))
+                            .background(lossless ? AnyShapeStyle(losslessChip) : AnyShapeStyle(chip), in: RoundedRectangle(cornerRadius: 4))
                     }
                     if let tag = vsYoursTag(copy) {
                         Text(tag)
@@ -684,7 +763,7 @@ private struct CopyLine: View {
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(thread, lineWidth: 1))
                             .accessibilityLabel(vsYoursSpoken(copy) ?? tag)
                     }
-                    Text(candidateTitle(copy)).font(.octoBodySmall).foregroundStyle(.white).lineLimit(1)
+                    Text(candidateTitle(copy)).font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary).lineLimit(1)
                 }
                 if let place = copy.album.flatMap({ $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }) ?? copy.folder {
                     Text(place).font(.octoCaption).foregroundStyle(OctoColor.textMuted).lineLimit(1)
@@ -694,13 +773,13 @@ private struct CopyLine: View {
                 if let verdict = copy.rank.map(rankWords) ?? candidateVerdict(copy) {
                     Text(verdict)
                         .font(.octoCaption)
-                        .foregroundStyle(copy.rank == 1 ? Color.white : OctoColor.textMuted)
+                        .foregroundStyle(copy.rank == 1 ? AnyShapeStyle(OctoColor.textPrimary) : AnyShapeStyle(OctoColor.textMuted))
                         .lineLimit(2)
                 }
                 if replacingNow {
                     HStack(spacing: 8) {
                         DownloadProgressRing(fraction: replacing?.fraction, size: 16)
-                        Text(replacingWords(replacing)).font(.octoCaption).foregroundStyle(.white)
+                        Text(replacingWords(replacing)).font(.octoCaption).foregroundStyle(OctoColor.textPrimary)
                     }
                     .padding(.top, 4)
                     .accessibilityElement(children: .combine)
@@ -734,7 +813,7 @@ private struct ReplaceItCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(replaceQuestion(copy)).font(.octoBodySmall).foregroundStyle(.white)
+            Text(replaceQuestion(copy)).font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary)
             Text(findReplaces(asksFirst: asksFirst)).font(.octoCaption).foregroundStyle(OctoColor.textMuted)
             HStack(spacing: 10) {
                 GlazeButton("Cancel", size: .small, action: no)
@@ -749,6 +828,9 @@ private struct ReplaceItCard: View {
 }
 
 /// The sheet's top line inside a log or Find songs: back, the view's title, then its actions.
+/// The sheet's top line inside a log or Find songs: back, the page's name and its actions. The
+/// name never gives way: when the actions do not fit beside it, they go on a line of their own
+/// under it, their words lined up with the name's.
 private struct SheetBar<Actions: View>: View {
     let back: String
     let onBack: () -> Void
@@ -756,25 +838,48 @@ private struct SheetBar<Actions: View>: View {
     @ViewBuilder let actions: Actions
 
     var body: some View {
-        HStack(spacing: 0) {
-            Button(action: onBack) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(OctoColor.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Circle())
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 0) {
+                backButton
+                name
+                Spacer(minLength: 8)
+                actions.fixedSize()
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(back)
-            Text(title ?? "")
-                .font(.octoSection)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityAddTraits(.isHeader)
-            actions.fixedSize()
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 0) {
+                    backButton
+                    name
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 0) { actions }
+                    .fixedSize()
+                    .padding(.leading, backSize - quietInset)
+            }
         }
         .padding(.leading, 8)
         .padding(.trailing, 10)
     }
+
+    private var backButton: some View {
+        Button(action: onBack) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(OctoColor.textSecondary)
+                .frame(width: backSize, height: backSize)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(back)
+    }
+
+    private var name: some View {
+        Text(title ?? "")
+            .font(.octoSection)
+            .foregroundStyle(OctoColor.textPrimary)
+            .fixedSize()
+            .accessibilityAddTraits(.isHeader)
+    }
 }
+
+/// The sheet bar's back button.
+private let backSize: CGFloat = 44

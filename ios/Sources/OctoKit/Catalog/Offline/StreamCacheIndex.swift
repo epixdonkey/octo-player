@@ -9,14 +9,18 @@ public struct StreamCacheEntry: Codable, Sendable, Equatable {
     public var pieces: [[Int64]]
     public var lastTouchedMs: Int64
     public var fileSize: Int64?
+    /// The YouTube video a song found online was saved from, as its stream named it. Lists written
+    /// before it was kept read back without it.
+    public var video: String?
 
     public init(contentLength: Int64? = nil, mimeType: String? = nil, pieces: [[Int64]] = [], lastTouchedMs: Int64,
-                fileSize: Int64? = nil) {
+                fileSize: Int64? = nil, video: String? = nil) {
         self.contentLength = contentLength
         self.mimeType = mimeType
         self.pieces = pieces
         self.lastTouchedMs = lastTouchedMs
         self.fileSize = fileSize
+        self.video = video
     }
 }
 
@@ -74,21 +78,23 @@ public struct StreamCacheIndex: Sendable, Equatable {
     /// with the new file's. True when it went.
     @discardableResult
     public mutating func answered(_ key: String, _ shape: StreamShape) -> Bool {
-        guard let entry = entries[key], StreamShape(type: entry.mimeType, total: entry.contentLength).differs(from: shape) else {
+        guard let entry = entries[key],
+              StreamShape(type: entry.mimeType, total: entry.contentLength, video: entry.video).differs(from: shape) else {
             return false
         }
         drop(key)
         return true
     }
 
-    /// Notes the whole length and type of a song as the server gave them. A song may be described
-    /// before any of it is saved, and a stream that ended short of what it said is described again
-    /// with the length it really had.
-    public mutating func describe(_ key: String, contentLength: Int64?, mimeType: String?, nowMs: Int64) {
+    /// Notes the whole length, type and video of a song as the server gave them. A song may be
+    /// described before any of it is saved, and a stream that ended short of what it said is
+    /// described again with the length it really had.
+    public mutating func describe(_ key: String, contentLength: Int64?, mimeType: String?, video: String? = nil, nowMs: Int64) {
         guard enabled else { return }
         var entry = entries[key] ?? StreamCacheEntry(lastTouchedMs: nowMs)
         if let contentLength, contentLength > 0 { entry.contentLength = contentLength }
         if let mimeType { entry.mimeType = mimeType }
+        if let video, !video.isEmpty { entry.video = video }
         entries[key] = entry
     }
 
@@ -122,6 +128,27 @@ public struct StreamCacheIndex: Sendable, Equatable {
     }
 
     public mutating func removeAll() { entries = [:] }
+
+    /// Lets go of every saved copy of one song of one server, whatever type, request or size it was
+    /// saved in, as when the server changed the video it streams from, which makes each of them
+    /// another file. The names wait in `dropped` for their files to go. Answers them, in order.
+    @discardableResult
+    public mutating func dropSong(sourceId: String, serverId: String) -> [String] {
+        let prefix = "\(sourceId)|\(serverId)|"
+        let going = entries.keys.filter { $0.hasPrefix(prefix) && Self.isCopyTail($0.dropFirst(prefix.count)) }.sorted()
+        for key in going { drop(key) }
+        return going
+    }
+
+    /// Whether what follows a song's server and id in a saved name is a type and a request, with a
+    /// file size or not (see `streamCacheKey`), so a song whose id starts with this one's and a bar
+    /// is never taken for it.
+    private static func isCopyTail(_ tail: Substring) -> Bool {
+        let parts = tail.split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count == 2 || parts.count == 3, !parts[0].isEmpty else { return false }
+        let digits = { (part: Substring) in !part.isEmpty && part.allSatisfy { $0.isASCII && $0.isNumber } }
+        return (parts[1] == "raw" || digits(parts[1])) && (parts.count == 2 || digits(parts[2]))
+    }
 
     /// The songs to let go so `incoming` more bytes fit in `limitBytes`, least recently played
     /// first; a song goes whole. Never `keeping`, the song being saved now.

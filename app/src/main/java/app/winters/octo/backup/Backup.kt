@@ -11,13 +11,34 @@ import app.winters.octo.liveradio.LiveStation
 import app.winters.octo.lyrics.LyricsLook
 import app.winters.octo.offline.CacheSize
 import app.winters.octo.offline.OfflinePrefs
+import app.winters.octo.playback.BETWEEN_SONGS_SETTINGS_VERSION
+import app.winters.octo.playback.BetweenSongs
+import app.winters.octo.playback.BetweenSongsWrite
+import app.winters.octo.playback.DownloadFormat
+import app.winters.octo.playback.RestoredBetweenSongs
+import app.winters.octo.playback.StoredBetweenSongs
 import app.winters.octo.playback.StreamQuality
+import app.winters.octo.playback.restoredBetweenSongs
 import app.winters.octo.player.PlayerPrefs
 import app.winters.octo.player.StreamPrefs
 import app.winters.octo.playlists.BYTE_ORDER_MARK
 import app.winters.octo.sound.SoundSettings
+import app.winters.octo.theme.ThemeSettings
+import app.winters.octo.theme.themeSettings
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
 import java.net.URI
 import kotlin.math.abs
 
@@ -99,6 +120,7 @@ data class OfflineBackup(
     val prefetchWifi: Int = offlineDefaults.prefetchWifi,
     val prefetchMobile: Int = offlineDefaults.prefetchMobile,
     val downloadQuality: StreamQuality = offlineDefaults.downloadQuality,
+    val downloadFormat: DownloadFormat = offlineDefaults.downloadFormat,
     val wifiOnly: Boolean = offlineDefaults.wifiOnly,
     val streamOnWifi: Boolean = offlineDefaults.streamOnWifi,
     val keepLiked: Boolean = offlineDefaults.keepLiked,
@@ -110,6 +132,7 @@ data class OfflineBackup(
         prefetchWifi = prefetchWifi,
         prefetchMobile = prefetchMobile,
         downloadQuality = downloadQuality,
+        downloadFormat = downloadFormat,
         wifiOnly = wifiOnly,
         streamOnWifi = streamOnWifi,
         keepLiked = keepLiked,
@@ -124,6 +147,7 @@ fun OfflinePrefs.toBackup(playlistNames: Map<String, String>) = OfflineBackup(
     prefetchWifi = prefetchWifi,
     prefetchMobile = prefetchMobile,
     downloadQuality = downloadQuality,
+    downloadFormat = downloadFormat,
     wifiOnly = wifiOnly,
     streamOnWifi = streamOnWifi,
     keepLiked = keepLiked,
@@ -145,6 +169,87 @@ data class ListenBrainzBackup(
 @Serializable
 data class ServerBackup(val address: String, val username: String)
 
+// The player's settings with the theme beside them: one JSON object, the
+// player's fields as they always were, then `theme`, `themeLight`,
+// `themeDark` and `themeMatch`. A backup from before themes has none of the
+// four and reads as Octo's.
+//
+// The Between songs choice: `settingsVersion` says the backup has it,
+// `betweenSongs` is there only when the device stored a choice, and
+// `crossfade` and `smartTransitions` say the same to older apps. Read
+// back, `prefs` holds what a restore leaves the device showing: a backup
+// from before the choice goes through the untouched rule on its old
+// fields, and a newer one without a choice is untouched.
+@Serializable(with = PlayerBackupSerializer::class)
+data class PlayerBackup(
+    val prefs: PlayerPrefs = PlayerPrefs(),
+    val theme: String? = null,
+    val themeLight: String? = null,
+    val themeDark: String? = null,
+    val themeMatch: Boolean? = null,
+) {
+    // The theme settings this holds, a name this app does not know read as
+    // that field's default.
+    fun themes(): ThemeSettings = themeSettings(theme, themeLight, themeDark, themeMatch ?: false)
+}
+
+object PlayerBackupSerializer : KSerializer<PlayerBackup> {
+    private const val SETTINGS_VERSION = "settingsVersion"
+    private const val BETWEEN_SONGS = "betweenSongs"
+    private const val CROSSFADE = "crossfade"
+    private const val SMART_TRANSITIONS = "smartTransitions"
+
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor("PlayerBackup")
+
+    override fun serialize(encoder: Encoder, value: PlayerBackup) {
+        val json = encoder as JsonEncoder
+        val fields = json.json.encodeToJsonElement(PlayerPrefs.serializer(), value.prefs).jsonObject.toMutableMap()
+        val mirrors = BetweenSongsWrite(value.prefs.betweenSongs)
+        fields[CROSSFADE] = JsonPrimitive(mirrors.crossfade)
+        fields[SMART_TRANSITIONS] = JsonPrimitive(mirrors.smartTransitions)
+        fields[SETTINGS_VERSION] = JsonPrimitive(BETWEEN_SONGS_SETTINGS_VERSION)
+        if (value.prefs.betweenSongsStored) fields[BETWEEN_SONGS] = JsonPrimitive(value.prefs.betweenSongs.stored)
+        value.theme?.let { fields["theme"] = JsonPrimitive(it) }
+        value.themeLight?.let { fields["themeLight"] = JsonPrimitive(it) }
+        value.themeDark?.let { fields["themeDark"] = JsonPrimitive(it) }
+        value.themeMatch?.let { fields["themeMatch"] = JsonPrimitive(it) }
+        json.encodeJsonElement(JsonObject(fields))
+    }
+
+    override fun deserialize(decoder: Decoder): PlayerBackup {
+        val json = decoder as JsonDecoder
+        val fields = json.decodeJsonElement().jsonObject
+        fun text(key: String) = (fields[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        fun flag(key: String) = (fields[key] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull
+        fun number(key: String) = (fields[key] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+        val prefs = json.json.decodeFromJsonElement(PlayerPrefs.serializer(), fields)
+        val saved = StoredBetweenSongs(
+            betweenSongs = text(BETWEEN_SONGS),
+            crossfade = flag(CROSSFADE),
+            crossfadeSeconds = number("crossfadeSeconds"),
+            smartTransitions = flag(SMART_TRANSITIONS),
+            filterSweeps = flag("filterSweeps"),
+            matchTempo = flag("matchTempo"),
+            crossfadeCurve = text("crossfadeCurve"),
+        )
+        val restored = when (val between = restoredBetweenSongs(number(SETTINGS_VERSION), saved)) {
+            RestoredBetweenSongs.Untouched -> prefs.copy(betweenSongs = BetweenSongs.Automix, betweenSongsStored = false, matchTempo = true)
+            is RestoredBetweenSongs.Chosen -> prefs.copy(
+                betweenSongs = between.write.choice,
+                betweenSongsStored = true,
+                matchTempo = between.write.matchTempo ?: prefs.matchTempo,
+            )
+        }
+        return PlayerBackup(
+            prefs = restored,
+            theme = text("theme"),
+            themeLight = text("themeLight"),
+            themeDark = text("themeDark"),
+            themeMatch = (fields["themeMatch"] as? JsonPrimitive)?.booleanOrNull,
+        )
+    }
+}
+
 // Everything a backup holds. Every part is optional, so a backup from an
 // older app with fewer settings still reads.
 @Serializable
@@ -152,7 +257,7 @@ data class Backup(
     val kind: String = BACKUP_KIND,
     val version: Int = BACKUP_VERSION,
     val createdAt: Long = 0,
-    val player: PlayerPrefs? = null,
+    val player: PlayerBackup? = null,
     val streaming: StreamPrefs? = null,
     val sound: SoundBackup? = null,
     val presets: List<PresetBackup> = emptyList(),
@@ -177,7 +282,7 @@ data class Backup(
     val keptStations: List<LiveStation> = emptyList(),
 )
 
-private val BackupJson = Json {
+internal val BackupJson = Json {
     prettyPrint = true
     encodeDefaults = true
     ignoreUnknownKeys = true
@@ -343,8 +448,16 @@ fun planRestore(
     )
 }
 
+// How many playlists, playlist songs, likes and ratings a backup holds,
+// counted from its lists, or as its read counted them.
+data class BackupSizes(val playlists: Int, val playlistSongs: Int, val likes: Int, val ratings: Int) {
+    companion object {
+        fun of(backup: Backup) = BackupSizes(backup.playlists.size, backup.playlists.sumOf { it.songs.size }, backup.likes.size, backup.ratings.size)
+    }
+}
+
 // What a backup holds, a line each, for showing before it is restored.
-fun describeBackup(backup: Backup): List<String> = buildList {
+fun describeBackup(backup: Backup, sizes: BackupSizes = BackupSizes.of(backup)): List<String> = buildList {
     val settings = listOfNotNull(
         "player".takeIf { backup.player != null },
         "streaming".takeIf { backup.streaming != null },
@@ -362,11 +475,11 @@ fun describeBackup(backup: Backup): List<String> = buildList {
         if (sound.perOutput && outputs > 0) add(plural(outputs, "output with its own sound", "outputs with their own sound"))
     }
     if (backup.presets.isNotEmpty()) add(plural(backup.presets.size, "equalizer preset", "equalizer presets"))
-    if (backup.playlists.isNotEmpty()) {
-        add(plural(backup.playlists.size, "playlist", "playlists") + ", " + plural(backup.playlists.sumOf { it.songs.size }, "song", "songs"))
+    if (sizes.playlists > 0) {
+        add(plural(sizes.playlists, "playlist", "playlists") + ", " + plural(sizes.playlistSongs, "song", "songs"))
     }
-    if (backup.likes.isNotEmpty()) add(plural(backup.likes.size, "liked song", "liked songs"))
-    if (backup.ratings.isNotEmpty()) add(plural(backup.ratings.size, "rating", "ratings"))
+    if (sizes.likes > 0) add(plural(sizes.likes, "liked song", "liked songs"))
+    if (sizes.ratings > 0) add(plural(sizes.ratings, "rating", "ratings"))
     if (backup.favouriteAlbums.isNotEmpty()) add(plural(backup.favouriteAlbums.size, "favorite album", "favorite albums"))
     if (backup.favouriteArtists.isNotEmpty()) add(plural(backup.favouriteArtists.size, "favorite artist", "favorite artists"))
     if (backup.pins.isNotEmpty()) add(plural(backup.pins.size, "pin on Home", "pins on Home"))
@@ -380,29 +493,66 @@ fun describeBackup(backup: Backup): List<String> = buildList {
     backup.server?.let { add("Server: ${it.address} as ${it.username}. Sign in again to use it.") }
 }
 
+// How much of a backup a library has, counted.
+data class PlanCounts(
+    val playlistsPlanned: Boolean,
+    val playlistSongs: Int,
+    val playlistSongsTotal: Int,
+    val skippedPlaylists: List<String>,
+    val likes: Int,
+    val likesTotal: Int,
+    val ratings: Int,
+    val ratingsTotal: Int,
+    val favouriteAlbums: Int,
+    val favouriteAlbumsTotal: Int,
+    val favouriteArtists: Int,
+    val favouriteArtistsTotal: Int,
+    val pins: Int,
+    val pinsTotal: Int,
+    val lyricsOffsets: Int,
+    val lyricsOffsetsTotal: Int,
+    val keptPlaylists: Int,
+    val keptPlaylistsTotal: Int,
+)
+
 // How much of a backup this library has, a line each, like "Playlists:
 // 331 of 340 songs found".
-fun describePlan(plan: RestorePlan): List<String> = buildList {
-    if (plan.playlists.isNotEmpty()) {
+fun describePlan(plan: RestorePlan): List<String> = describeCounts(
+    PlanCounts(
+        playlistsPlanned = plan.playlists.isNotEmpty(),
+        playlistSongs = plan.playlistSongs,
+        playlistSongsTotal = plan.playlistSongsTotal,
+        skippedPlaylists = plan.skippedPlaylists,
+        likes = plan.likes.size, likesTotal = plan.likesTotal, ratings = plan.ratings.size, ratingsTotal = plan.ratingsTotal,
+        favouriteAlbums = plan.favouriteAlbums.size, favouriteAlbumsTotal = plan.favouriteAlbumsTotal,
+        favouriteArtists = plan.favouriteArtists.size, favouriteArtistsTotal = plan.favouriteArtistsTotal,
+        pins = plan.pins.size, pinsTotal = plan.pinsTotal,
+        lyricsOffsets = plan.lyricsOffsets.size, lyricsOffsetsTotal = plan.lyricsOffsetsTotal,
+        keptPlaylists = plan.keptPlaylists.size, keptPlaylistsTotal = plan.keptPlaylistsTotal,
+    ),
+)
+
+fun describeCounts(plan: PlanCounts): List<String> = buildList {
+    if (plan.playlistsPlanned) {
         add("Playlists: ${plan.playlistSongs.grouped()} of ${plural(plan.playlistSongsTotal, "song", "songs")} found")
     }
     if (plan.skippedPlaylists.isNotEmpty()) {
         add("Already here, left as they are: ${plan.skippedPlaylists.joinToString(", ")}")
     }
-    if (plan.likesTotal > 0) add("Likes: ${plan.likes.size.grouped()} of ${plan.likesTotal.grouped()} found")
-    if (plan.ratingsTotal > 0) add("Ratings: ${plan.ratings.size.grouped()} of ${plan.ratingsTotal.grouped()} found")
+    if (plan.likesTotal > 0) add("Likes: ${plan.likes.grouped()} of ${plan.likesTotal.grouped()} found")
+    if (plan.ratingsTotal > 0) add("Ratings: ${plan.ratings.grouped()} of ${plan.ratingsTotal.grouped()} found")
     if (plan.favouriteAlbumsTotal > 0) {
-        add("Favorite albums: ${plan.favouriteAlbums.size.grouped()} of ${plan.favouriteAlbumsTotal.grouped()} found")
+        add("Favorite albums: ${plan.favouriteAlbums.grouped()} of ${plan.favouriteAlbumsTotal.grouped()} found")
     }
     if (plan.favouriteArtistsTotal > 0) {
-        add("Favorite artists: ${plan.favouriteArtists.size.grouped()} of ${plan.favouriteArtistsTotal.grouped()} found")
+        add("Favorite artists: ${plan.favouriteArtists.grouped()} of ${plan.favouriteArtistsTotal.grouped()} found")
     }
-    if (plan.pinsTotal > 0) add("Pins: ${plan.pins.size.grouped()} of ${plan.pinsTotal.grouped()} found")
+    if (plan.pinsTotal > 0) add("Pins: ${plan.pins.grouped()} of ${plan.pinsTotal.grouped()} found")
     if (plan.lyricsOffsetsTotal > 0) {
-        add("Lyrics timing: ${plan.lyricsOffsets.size.grouped()} of ${plan.lyricsOffsetsTotal.grouped()} songs found")
+        add("Lyrics timing: ${plan.lyricsOffsets.grouped()} of ${plan.lyricsOffsetsTotal.grouped()} songs found")
     }
     if (plan.keptPlaylistsTotal > 0) {
-        add("Kept downloaded: ${plan.keptPlaylists.size.grouped()} of ${plural(plan.keptPlaylistsTotal, "playlist", "playlists")} found")
+        add("Kept downloaded: ${plan.keptPlaylists.grouped()} of ${plural(plan.keptPlaylistsTotal, "playlist", "playlists")} found")
     }
 }
 

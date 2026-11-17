@@ -32,9 +32,11 @@ public func userMessage(for error: Error) -> String? {
     }
     guard let error = error as? OctoError else { return "Something went wrong." }
     switch error {
+    case .notSubsonic(let gateway?, let loginSent), .http(_, let gateway?, let loginSent):
+        return GatewayWords.failure(gateway, loginSent: loginSent)
     case .notSubsonic:
         return "That address answered, but not like a music server. Check the port."
-    case .http(let status):
+    case .http(let status, _, _):
         return busyStatuses.contains(status)
             ? "The server isn't answering right now. It may be restarting, so try again in a moment."
             : "That address answered, but not like a music server. Check the port."
@@ -42,7 +44,7 @@ public func userMessage(for error: Error) -> String? {
         return "Wrong username or password."
     case .authUnsupported(let code, _):
         return code == 41
-            ? "This account can't sign in with a token. Turn on Legacy sign-in under Advanced."
+            ? SignInWords.legacyHint
             : "The server doesn't take this way of signing in."
     case .notFound:
         return "That isn't on the server any more."

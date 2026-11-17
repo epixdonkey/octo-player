@@ -41,10 +41,10 @@ struct LibraryView: View {
                 }
                 // What the server is downloading, on a server that keeps a log of it.
                 if serverDownloads.supported {
-                    let running = runningCount(serverDownloads.watch.rows)
                     LibraryHairline()
                     Button { router.showServerDownloads() } label: {
-                        SectionRow(icon: .cloud, label: "Server downloads", detail: running > 0 ? "\(running) on the way" : nil)
+                        // "2 on the way, 1 waits for you".
+                        SectionRow(icon: .cloud, label: "Server downloads", detail: drawerState(serverDownloads.watch.rows))
                     }
                     .buttonStyle(SqueezeStyle())
                 }
@@ -81,7 +81,7 @@ private struct SectionRow: View {
     var body: some View {
         HStack(spacing: 16) {
             IconView(icon, size: 24, color: OctoColor.accent)
-            Text(label).font(.octoBody).foregroundStyle(.white).frame(maxWidth: .infinity, alignment: .leading)
+            Text(label).font(.octoBody).foregroundStyle(OctoColor.textPrimary).frame(maxWidth: .infinity, alignment: .leading)
             if let detail { Text(detail).font(.octoCaption).foregroundStyle(OctoColor.textMuted) }
             IconView(.chevron, size: 22, color: OctoColor.textMuted)
         }
@@ -97,7 +97,7 @@ struct LibraryHairline: View {
     var trailing: CGFloat = 20
 
     var body: some View {
-        Rectangle().fill(LibraryLook.hairline).frame(height: 1).padding(.leading, leading).padding(.trailing, trailing)
+        Rectangle().fill(OctoColor.hairline).frame(height: 1).padding(.leading, leading).padding(.trailing, trailing)
     }
 }
 
@@ -211,7 +211,7 @@ struct AlbumsView: View {
                     .padding(.top, pageTopGap)
                     if let sorted {
                         if sorted.items.isEmpty {
-                            EmptyLibraryNote()
+                            CopyAwareNote { EmptyLibraryNote() }
                         } else {
                             FirstRowMark().id("first")
                             LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
@@ -290,7 +290,7 @@ struct ArtistsView: View {
                     .padding(.top, pageTopGap)
                     if let sorted {
                         if sorted.items.isEmpty {
-                            EmptyLibraryNote()
+                            CopyAwareNote { EmptyLibraryNote() }
                         } else {
                             FirstRowMark().id("first")
                             LetterRuns(items: sorted.items, headings: sorted.headings, id: \.id) { _, artist in
@@ -469,7 +469,9 @@ struct FavoritesView: View {
     private var songsSegment: some View {
         if let songs {
             if songs.isEmpty {
-                MutedNote("No liked songs yet. Tap the heart in the player to add the song that is playing, or long press any song and choose Add to Liked songs.")
+                CopyAwareNote(likes: true) {
+                    MutedNote("No liked songs yet. Tap the heart in the player to add the song that is playing, or long press any song and choose Add to Liked songs.")
+                }
             } else {
                 FirstRowMark().id("liked-top")
                 ForEach(Array(songs.enumerated()), id: \.element.id) { position, track in
@@ -493,7 +495,7 @@ struct FavoritesView: View {
     private var albumsSegment: some View {
         if let albums {
             if albums.isEmpty {
-                MutedNote("Heart an album from its page or its menu to keep it here.")
+                CopyAwareNote(likes: true) { MutedNote("Heart an album from its page or its menu to keep it here.") }
             } else {
                 FirstRowMark().id("favorites-top")
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
@@ -512,7 +514,7 @@ struct FavoritesView: View {
     private var artistsSegment: some View {
         if let artists {
             if artists.isEmpty {
-                MutedNote("Heart an artist from their page or their menu to keep them here.")
+                CopyAwareNote(likes: true) { MutedNote("Heart an artist from their page or their menu to keep them here.") }
             } else {
                 FirstRowMark().id("favorites-top")
                 ForEach(artists, id: \.artist.id) { liked in ArtistRow(artist: liked.artist) }

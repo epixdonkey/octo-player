@@ -18,15 +18,28 @@ public struct StreamRef: Sendable, Hashable {
     public var bitrate: Int?
     public var pinned: StreamRequest?
     public var size: Int64?
+    /// How many times a version picked for the song started its queue entry over. The play token
+    /// names it, so each restart is a new play to the server.
+    public var restarts: Int
 
     public init(sourceId: String?, serverId: String, mimeType: String?, bitrate: Int?, pinned: StreamRequest? = nil,
-                size: Int64? = nil) {
+                size: Int64? = nil, restarts: Int = 0) {
         self.sourceId = sourceId
         self.serverId = serverId
         self.mimeType = mimeType
         self.bitrate = bitrate
         self.pinned = pinned
         self.size = size.flatMap { $0 > 0 ? $0 : nil }
+        self.restarts = max(0, restarts)
+    }
+
+    /// The song as its next play opens it after a version was picked for it: the next restart, and
+    /// no file size, since the file the server sends now is another.
+    public func restarted() -> StreamRef {
+        var copy = self
+        copy.size = nil
+        copy.restarts += 1
+        return copy
     }
 
     public func pin(_ request: StreamRequest) -> StreamRef {
@@ -47,6 +60,10 @@ public func streamUri(_ ref: StreamRef) -> String {
     if let bitrate = ref.bitrate { params.append(("bitrate", "\(bitrate)")) }
     if let size = ref.size { params.append(("size", "\(size)")) }
     if let pinned = ref.pinned { params.append(("max", pinned.maxKbps.map(String.init) ?? rawRequest)) }
+    // Written only when a request differs from a stream's, so older addresses read the same.
+    if let pinned = ref.pinned, pinned.maxKbps != nil, pinned.format != .mp3 { params.append(("fmt", pinned.format.param)) }
+    if let pinned = ref.pinned, pinned.maxKbps != nil, !pinned.estimate { params.append(("est", "0")) }
+    if ref.restarts > 0 { params.append(("restart", "\(ref.restarts)")) }
     if !params.isEmpty { out += "?" + params.map { "\($0.0)=\(formEncode($0.1))" }.joined(separator: "&") }
     return out
 }
@@ -69,12 +86,14 @@ public func parseStreamUri(_ uri: String) -> StreamRef? {
             query[key] = ""
         }
     }
+    let format = DownloadFormat.allCases.first { $0.param == query["fmt"] } ?? .mp3
+    let estimate = query["est"] != "0"
     let pinned: StreamRequest? = query["max"].flatMap { max in
-        max == rawRequest ? StreamRequest(nil) : Int(max).map { StreamRequest($0) }
+        max == rawRequest ? StreamRequest(nil) : Int(max).map { StreamRequest($0, format: format, estimate: estimate) }
     }
     return StreamRef(sourceId: query["source"].flatMap { $0.isEmpty ? nil : $0 }, serverId: serverId,
                      mimeType: query["mime"].flatMap { $0.isEmpty ? nil : $0 }, bitrate: query["bitrate"].flatMap { Int($0) },
-                     pinned: pinned, size: query["size"].flatMap { Int64($0) })
+                     pinned: pinned, size: query["size"].flatMap { Int64($0) }, restarts: query["restart"].flatMap { Int($0) } ?? 0)
 }
 
 /// The name a server song is saved under on the phone: the server, the song, its file type, what
@@ -82,18 +101,35 @@ public func parseStreamUri(_ uri: String) -> StreamRef? {
 /// is saved apart from the old one. Never the signed address, which has a new random part every
 /// time, so the same song finds its saved copy.
 public func streamCacheKey(_ sourceId: String, _ ref: StreamRef, _ request: StreamRequest) -> String {
-    let plain = "\(sourceId)|\(ref.serverId)|\(ref.mimeType ?? "unknown")|\(request.maxKbps.map(String.init) ?? rawRequest)"
+    let plain = "\(sourceId)|\(ref.serverId)|\(ref.mimeType ?? "unknown")|\(requestToken(request))"
     return ref.size.map { "\(plain)|\($0)" } ?? plain
 }
 
-/// A saved key less the file size, when it has one. The part before a size is a request ("raw" or
-/// a number), which a file type never is.
+/// "raw", the cap in kbps for an MP3 (as every name was before formats), or the format's name before
+/// the cap for another ("opus128"), so each format is saved apart and an MP3 is found under the name
+/// it always had.
+private func requestToken(_ request: StreamRequest) -> String {
+    guard let kbps = request.maxKbps else { return rawRequest }
+    return request.format == .mp3 ? "\(kbps)" : "\(request.format.param)\(kbps)"
+}
+
+/// A saved key less the file size, when it has one. The part before a size is a request ("raw", a
+/// number, or a format's name and a number), which a file type never is.
 public func cacheKeyWithoutSize(_ key: String) -> String {
     guard let bar = key.lastIndex(of: "|") else { return key }
     let head = key[..<bar]
     let before = head.lastIndex(of: "|").map { head[head.index(after: $0)...] } ?? head
-    let isRequest = before == Substring(rawRequest) || (!before.isEmpty && before.allSatisfy { $0.isASCII && $0.isNumber })
-    return isRequest ? String(head) : key
+    return isRequestToken(before) ? String(head) : key
+}
+
+private func isRequestToken(_ text: Substring) -> Bool {
+    if text == Substring(rawRequest) { return true }
+    var digits = text
+    for format in DownloadFormat.allCases where format != .mp3 && text.hasPrefix(format.param) {
+        digits = text.dropFirst(format.param.count)
+        break
+    }
+    return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
 }
 
 /// What the phone has saved under a name, for picking the name a song reads and writes its saved

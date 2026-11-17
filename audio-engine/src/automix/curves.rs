@@ -57,6 +57,61 @@ pub fn automix_in_gain(t: f64, k: f64) -> f64 {
     (1.0 - out * out).max(0.0).sqrt()
 }
 
+/// Where a blend whose start is held is along its curve at `t` (0 to 1):
+/// the outgoing song alone at its own level until `hold_share`, while the
+/// incoming one's first sound is still to come, then the curve over the
+/// rest of the overlap. Below 0 while held, where every curve gives the
+/// outgoing song 1 and the incoming one 0.
+pub fn past_hold(t: f64, hold_share: f64) -> f64 {
+    if hold_share <= 0.0 {
+        t
+    } else if hold_share >= 1.0 {
+        -1.0
+    } else {
+        (t - hold_share) / (1.0 - hold_share)
+    }
+}
+
+/// The outgoing song's volume at `t` (0 to 1) through an intro: its own
+/// level until `hold_share`, then an equal-power fade to nothing at the end,
+/// so the fade's middle falls halfway between the two.
+pub fn intro_out_gain(t: f64, hold_share: f64) -> f64 {
+    let p = t.clamp(0.0, 1.0);
+    let hold = hold_share.clamp(0.0, 1.0);
+    if p <= hold || hold >= 1.0 {
+        return 1.0;
+    }
+    ((p - hold) / (1.0 - hold) * PI / 2.0).cos().clamp(0.0, 1.0)
+}
+
+/// The incoming song's volume at `t` through an intro: up from nothing on a
+/// quarter sine over the rise (`rise_share`, ending by `hold_share` at the
+/// latest) to `level`, then `level` until `hold_share`, so its quiet start
+/// plays under the outgoing song at that much of its own level; past the
+/// hold it comes up as the outgoing song's power leaves,
+/// `sqrt(level^2 + (1 - level^2) * (1 - out^2))` with `out` the outgoing
+/// song's [`intro_out_gain`], to its own level at the end. At level 1 it is
+/// full from the rise's end on.
+pub fn intro_in_gain(t: f64, rise_share: f64, hold_share: f64, level: f64) -> f64 {
+    let p = t.clamp(0.0, 1.0);
+    let hold = hold_share.clamp(0.0, 1.0);
+    let rise = rise_share.clamp(0.0, 1.0).min(hold);
+    let g = level.clamp(0.0, 1.0);
+    if p < rise {
+        return (PI / 2.0 * p / rise).sin() * g;
+    }
+    if p <= hold {
+        return g;
+    }
+    let out = intro_out_gain(p, hold_share);
+    (g * g + (1.0 - g * g) * (1.0 - out * out)).sqrt()
+}
+
+/// Both volumes of an intro at once: outgoing, then incoming.
+pub fn intro_gains(t: f64, hold_share: f64, rise_share: f64, level: f64) -> (f64, f64) {
+    (intro_out_gain(t, hold_share), intro_in_gain(t, rise_share, hold_share, level))
+}
+
 // Moves from `from` to `to` on a log scale as u goes from 0 to 1.
 fn log_between(from: f64, to: f64, u: f64) -> f64 {
     from * (to / from).powf(u.clamp(0.0, 1.0))

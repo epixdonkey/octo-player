@@ -23,15 +23,20 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.systemGestures
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyItemScope
@@ -48,6 +53,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -63,7 +69,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -71,15 +79,19 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.winters.octo.design.FloatingGlaze
 import app.winters.octo.design.Glaze
+import app.winters.octo.design.SelectedFill
 import app.winters.octo.design.GlowIcon
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
+import app.winters.octo.design.glassFilm
 import app.winters.octo.sort.SortList
 import app.winters.octo.sort.SortOption
 import app.winters.octo.sort.SortOrder
@@ -90,7 +102,7 @@ import app.winters.octo.sort.sortScale
 private val SortCapsuleHeight = 34.dp
 
 // The marks either side of the sort name: white, a step quieter than it.
-private val SortMarkTint = Color.White.copy(alpha = 0.72f)
+private val SortMarkTint: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.72f)
 
 // Which way the sort button's arrow points, in degrees: the up arrow as
 // drawn for ascending, turned half round for descending. The turn is
@@ -221,7 +233,7 @@ internal fun SortChoices(request: SortRequest, close: () -> Unit) {
 }
 
 // The words and mark of the direction not chosen: white, well back.
-private val UnchosenTint = Color.White.copy(alpha = 0.45f)
+private val UnchosenTint: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.45f)
 
 // The two directions side by side in one glaze, named for what they mean
 // here ("A to Z", "Newest"). The chosen one is the accent-tinted pill with white
@@ -278,10 +290,10 @@ private fun DirectionPair(option: SortOption, descending: Boolean, modifier: Mod
 // The popup's card is padded 6dp, so a pill's corners follow its 20dp.
 private val OptionShape = RoundedCornerShape(14.dp)
 
-private val OptionLine = OctoColors.TextPrimary.copy(alpha = 0.08f)
+private val OptionLine: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.08f)
 
 // The options not chosen: a step back from the chosen one's white.
-private val OtherOptionTint = Color.White.copy(alpha = 0.7f)
+private val OtherOptionTint: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.7f)
 
 // What a list can be ordered by, one above the other with hairlines
 // between, as in the other glass menus. The chosen option sits in the
@@ -312,22 +324,24 @@ private fun SortOptions(options: List<SortOption>, selected: Int, onPick: (Int) 
                 contentAlignment = Alignment.CenterStart,
             ) {
                 if (chosen) Box(Modifier.matchParentSize().background(OctoColors.AccentSelected, OptionShape))
-                Row(
-                    Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Text(
-                        option.label,
-                        style = OctoType.bodySmall.copy(fontWeight = if (chosen) FontWeight.Medium else FontWeight.Normal),
-                        color = if (chosen) OctoColors.TextPrimary else OtherOptionTint,
-                        modifier = Modifier.weight(1f),
-                    )
-                    // The check's room is kept on every line.
-                    if (chosen) {
-                        Icon(painterResource(OctoIcons.Check), contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-                    } else {
-                        Spacer(Modifier.size(18.dp))
+                SelectedFill(chosen) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text(
+                            option.label,
+                            style = OctoType.bodySmall.copy(fontWeight = if (chosen) FontWeight.Medium else FontWeight.Normal),
+                            color = if (chosen) OctoColors.TextPrimary else OtherOptionTint,
+                            modifier = Modifier.weight(1f),
+                        )
+                        // The check's room is kept on every line.
+                        if (chosen) {
+                            Icon(painterResource(OctoIcons.Check), contentDescription = null, tint = OctoColors.TextPrimary, modifier = Modifier.size(18.dp))
+                        } else {
+                            Spacer(Modifier.size(18.dp))
+                        }
                     }
                 }
             }
@@ -365,8 +379,8 @@ fun TopOnNewOrder(order: SortOrder, state: LazyGridState, top: Int = 0) {
 // The order last shown. Not state: changing it must not recompose.
 private class ShownOrder(var order: SortOrder)
 
-// Rows under sticky letter headings, a heading for each run. Rows move
-// lightly into place when the order changes.
+// Rows under letter headings, a heading for each run, each heading one item
+// of the list. Rows move lightly into place when the order changes.
 fun <T> LazyListScope.letteredRows(
     items: List<T>,
     runs: List<LetterRun>,
@@ -374,7 +388,7 @@ fun <T> LazyListScope.letteredRows(
     row: @Composable LazyItemScope.(T) -> Unit,
 ) {
     runs.forEachIndexed { runIndex, run ->
-        stickyHeader(key = "letter:$runIndex:${run.letter}") { LetterHeading(run.letter) }
+        item(key = "letter:$runIndex:${run.letter}") { LetterHeading(run.letter) }
         items(items.subList(run.start, run.start + run.count), key = key) { item ->
             Box(Modifier.animateItem()) { row(item) }
         }
@@ -388,25 +402,30 @@ fun <T> LazyListScope.sortedRows(items: List<T>, key: (T) -> Any, row: @Composab
     }
 }
 
-// The letter a run of rows starts with. It stays at the top while its rows
-// scroll, as a small dark pill rather than a full-width band, so the page's
-// glow still shows around it.
+// The letter a run of rows starts with, scrolling with its rows: a small dark
+// pill rather than a full-width band, so the page's glow still shows around
+// it. Its left edge lines up with the rows' covers.
 @Composable
-private fun LetterHeading(letter: Char) {
-    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+fun LetterHeading(letter: Char) {
+    Box(Modifier.fillMaxWidth().padding(start = ListRowSide, end = ListRowSide, top = 16.dp, bottom = 4.dp)) {
         Text(
             letter.toString(),
             style = OctoType.caption.copy(fontWeight = FontWeight.Bold),
             color = OctoColors.TextMuted,
             textAlign = TextAlign.Center,
             modifier = Modifier
-                .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+                .background(glassFilm(0.55f), CircleShape)
                 .sizeIn(minWidth = 26.dp, minHeight = 26.dp)
                 .wrapContentHeight(Alignment.CenterVertically)
                 .padding(horizontal = 8.dp, vertical = 4.dp),
         )
     }
 }
+
+// The letter the list shows at its top: the last rail stop at or above the
+// first visible item `firstVisible`, null above the first stop.
+fun railLetterAt(stops: List<RailStop>, firstVisible: Int): Char? =
+    stops.lastOrNull { it.index <= firstVisible }?.letter
 
 // A list this long, ordered by name, gets the letter rail.
 const val RAIL_MIN_ITEMS = 60
@@ -415,18 +434,47 @@ const val RAIL_MIN_ITEMS = 60
 // and long enough.
 fun railShows(byName: Boolean, count: Int): Boolean = byName && count >= RAIL_MIN_ITEMS
 
-// How wide the letter rail is. A list that shows it keeps this much room
+// How wide the letter rail is. A list that shows it keeps letterRailRoom()
 // at its end, so the rail never sits over a row's length or a cover.
-val LetterRailWidth = 24.dp
+private val LetterRailWidth = 24.dp
 private val RailWidth = LetterRailWidth
 private val BubbleSize = 64.dp
 
-// The letters of a long list ordered by name, down its right edge. Touching
-// or dragging along it jumps the list to a letter, with that letter shown
-// large beside the finger. Place it over the list, the size of the list;
-// only the rail itself takes touches.
+// The strip along the list's end edge where the phone's back gesture starts:
+// a touch there goes to the gesture, never to the app. It is as wide as the
+// phone sets it (often 30dp with gesture navigation) and nothing with
+// navigation buttons. The letter rail sits just inside it. Pages already
+// keep clear of the cutout and a side navigation bar (sideways), so only
+// the part of the strip past those counts.
 @Composable
-fun LetterRail(stops: List<RailStop>, onJump: (Int) -> Unit, modifier: Modifier = Modifier) {
+fun backGestureEdge(): Dp {
+    val density = LocalDensity.current
+    val layout = LocalLayoutDirection.current
+    val gestures = WindowInsets.systemGestures
+    val sides = WindowInsets.displayCutout.union(WindowInsets.navigationBars)
+    val px = if (layout == LayoutDirection.Ltr) {
+        gestures.getRight(density, layout) - sides.getRight(density, layout)
+    } else {
+        gestures.getLeft(density, layout) - sides.getLeft(density, layout)
+    }
+    return with(density) { px.coerceAtLeast(0).toDp() }
+}
+
+// The room a letter rail takes at the end of a list: the rail itself and the
+// back gesture's strip beyond it.
+@Composable
+fun letterRailRoom(): Dp = LetterRailWidth + backGestureEdge()
+
+// The letters of a long list ordered by name, down its end edge, just inside
+// the phone's back gesture strip so a drag along it reaches the rail.
+// Touching or dragging along it jumps the list to a letter, with that letter
+// shown large beside the finger. `current` is the letter the list shows at
+// its top (see railLetterAt), lit while the list scrolls; the touched letter
+// wins while the rail is held. Place it over the list, the size of the
+// list; only the rail itself takes touches.
+@Composable
+fun LetterRail(stops: List<RailStop>, current: Char?, onJump: (Int) -> Unit, modifier: Modifier = Modifier) {
+    val edge = backGestureEdge()
     val haptics = LocalHapticFeedback.current
     val latestStops by rememberUpdatedState(stops)
     val jump by rememberUpdatedState(onJump)
@@ -440,6 +488,7 @@ fun LetterRail(stops: List<RailStop>, onJump: (Int) -> Unit, modifier: Modifier 
         Column(
             Modifier
                 .align(Alignment.CenterEnd)
+                .padding(end = edge)
                 .fillMaxHeight()
                 .width(RailWidth)
                 .onSizeChanged { railHeight = it.height }
@@ -467,12 +516,13 @@ fun LetterRail(stops: List<RailStop>, onJump: (Int) -> Unit, modifier: Modifier 
                 }
                 .semantics { contentDescription = "Letters. Drag to jump through the list." },
         ) {
+            val lit = if (active >= 0) active else stops.indexOfFirst { it.letter == current }
             stops.forEachIndexed { index, stop ->
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text(
                         stop.letter.toString(),
                         style = OctoType.caption.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-                        color = if (index == active) OctoColors.TextPrimary else OctoColors.TextMuted,
+                        color = if (index == lit) OctoColors.TextPrimary else OctoColors.TextMuted,
                     )
                 }
             }
@@ -487,7 +537,7 @@ fun LetterRail(stops: List<RailStop>, onJump: (Int) -> Unit, modifier: Modifier 
                 .align(Alignment.TopEnd)
                 .offset {
                     val y = slot * (shown + 0.5f) - BubbleSize.toPx() / 2
-                    IntOffset(-(RailWidth + 16.dp).roundToPx(), y.toInt())
+                    IntOffset(-(RailWidth + edge + 16.dp).roundToPx(), y.toInt())
                 },
         ) {
             FloatingGlaze(LocalHaze.current, Modifier.size(BubbleSize)) {

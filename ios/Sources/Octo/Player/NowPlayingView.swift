@@ -18,6 +18,7 @@ struct NowPlayingView: View {
     @Environment(LikeStore.self) private var likes
     @Environment(\.octoReduceMotion) private var calm
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.octoPalette) private var palette
     @State private var settings = AppSettings.shared
     @State private var look = PlayerLook.shared
     @State private var facts = PlayerSongFacts()
@@ -58,6 +59,7 @@ struct NowPlayingView: View {
     @State private var airPlay = AirPlayTrigger()
     @State private var showsTiming = false
     @State private var showsChooser = false
+    @State private var showsVersions = false
     /// While a live station plays: its details, and the stations it was started from.
     @State private var showsStationInfo = false
     @State private var showsStations = false
@@ -102,8 +104,8 @@ struct NowPlayingView: View {
     private var loop: PlayerLoop { settings.animatedArt.inPlayer(animated.known(loopAlbumId)) }
 
     private var ink: Color { colors.content }
-    private var muted: Color { mutedInk(ink, dark: colors.dark) }
-    private var accent: Color { accentInk(ink, dark: colors.dark) }
+    private var muted: Color { mutedInk(ink, dark: colors.dark, palette: palette) }
+    private var accent: Color { accentInk(ink, dark: colors.dark, palette: palette) }
 
 
     var body: some View {
@@ -186,28 +188,37 @@ struct NowPlayingView: View {
         .task(id: loopAlbumId) { _ = await animated.want(loopAlbumId) }
         .onAppear(perform: arrive)
         .accessibilityAction(.escape) { close() }
+        .octoOverArt()
         .sheet(isPresented: $showsChooser) {
             if let song = player.current {
                 LyricsChooserContent(song: song) { showsChooser = false }
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
+                    .preferredColorScheme(.dark)
+                    .octoOverArt()
             }
         }
         .sheet(isPresented: $showsQueue) {
             QueueSheet()
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+                .octoOverArt()
         }
         .sheet(isPresented: $showsStations) {
             StationListSheet { showsStations = false }
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+                .octoOverArt()
         }
         .sheet(isPresented: $showsStationInfo) {
             if let live = player.live {
                 StationInfoSheet(shown: live, coverArt: player.current?.coverArt) { showsStationInfo = false }
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
+                    .preferredColorScheme(.dark)
+                    .octoOverArt()
             }
         }
     }
@@ -215,7 +226,7 @@ struct NowPlayingView: View {
     /// The wash slows to 10 frames a second while a card is open over it or the app is not in
     /// front.
     private var focused: Bool {
-        scenePhase == .active && !(showsSleep || showsSpeed || showsTiming || showsChooser || showsStationInfo || showsStations)
+        scenePhase == .active && !(showsSleep || showsSpeed || showsTiming || showsChooser || showsStationInfo || showsStations || showsVersions)
     }
 
     // MARK: Layouts
@@ -452,12 +463,16 @@ struct NowPlayingView: View {
     /// The live station's menu, then AirPlay and Sound.
     private func liveMoreButton(_ live: LiveShown) -> some View {
         Menu {
-            if let item = player.currentItem {
-                LiveMenuItems(trackId: item.trackId, onAir: live.onAir, showInfo: { showsStationInfo = true }, openSearch: openSearch)
+            Group {
+                if let item = player.currentItem {
+                    LiveMenuItems(trackId: item.trackId, onAir: live.onAir, showInfo: { showsStationInfo = true }, openSearch: openSearch)
+                }
+                Section {
+                    PlayerMenuExtras(airPlay: airPlay) { route in close { router.go(route) } }
+                }
             }
-            Section {
-                PlayerMenuExtras(airPlay: airPlay) { route in close { router.go(route) } }
-            }
+            .preferredColorScheme(.dark)
+            .octoOverArt()
         } label: {
             TitleGlyph(icon: .more, color: ink.opacity(titleIcons.alpha))
                 .contentShape(Rectangle())
@@ -523,14 +538,24 @@ struct NowPlayingView: View {
         player.current.map { SongSubject(track: libraryActions.state.provisional($0), song: $0) }
     }
 
-    /// The song menu for the song playing, the same one every song row opens.
+    /// The song menu for the song playing, the same one every song row opens; for a song found
+    /// online, Try another version leads the player's own items, before AirPlay and Sound.
     private var moreButton: some View {
         Menu {
-            if let menuSubject {
-                SongMenuItems(subject: menuSubject) {
-                    PlayerMenuExtras(airPlay: airPlay) { route in close { router.go(route) } }
+            Group {
+                if let menuSubject {
+                    SongMenuItems(subject: menuSubject) {
+                        if offersVersions {
+                            Button { showsVersions = true } label: {
+                                Label(StreamVersionWords.menuRow, systemImage: "arrow.left.arrow.right")
+                            }
+                        }
+                        PlayerMenuExtras(airPlay: airPlay) { route in close { router.go(route) } }
+                    }
                 }
             }
+            .preferredColorScheme(.dark)
+            .octoOverArt()
         } label: {
             TitleGlyph(icon: .more, color: ink.opacity(titleIcons.alpha))
                 .contentShape(Rectangle())
@@ -538,6 +563,27 @@ struct NowPlayingView: View {
         .menuOrder(.fixed)
         .disabled(menuSubject == nil)
         .accessibilityLabel("More")
+        .sheet(isPresented: $showsVersions) { versionsSheet }
+    }
+
+    /// Whether the song playing can be given another version: found online, streaming from the
+    /// server in use while signed in, on a server that lets this person pick; never a station.
+    private var offersVersions: Bool {
+        guard let item = player.currentItem, let menuSubject else { return false }
+        return offersStreamVersions(extensions: session.extensions, signedIn: session.client != nil,
+                                    isFound: menuSubject.track.isFound, isStation: item.isRadioStation)
+    }
+
+    /// The versions sheet for the entry playing, at the large detent.
+    @ViewBuilder
+    private var versionsSheet: some View {
+        if let item = player.currentItem, let entry = item.entryId, let ref = parseStreamUri(item.uri), let song = player.current {
+            VersionsSheet(entryId: entry, serverId: ref.serverId, song: song) { showsVersions = false }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+                .octoOverArt()
+        }
     }
 
     private var switches: some View {
@@ -563,7 +609,7 @@ struct NowPlayingView: View {
                         .offset(x: 6, y: -4)
                 }
             }
-            .glassPopover(isPresented: $showsSleep) {
+            .glassPopover(isPresented: $showsSleep, overArt: true) {
                 TimeCard(start: .sleep, opening: sleepOpening) { showsSleep = false }
             }
     }

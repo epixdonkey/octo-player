@@ -133,6 +133,25 @@ class StreamShapesTest {
     }
 
     @Test
+    fun anotherVideoIsAnotherFile() {
+        val first = mapOf("Content-Type" to listOf("audio/webm"), "Content-Range" to listOf("bytes 0-99/4000"), "X-Octo-Video" to listOf("v1"))
+        assertEquals(StreamShape("audio/webm", 4_000, "v1"), streamShapeOf(first))
+        assertTrue(StreamShape("audio/webm", 4_000, "v1").differsFrom(StreamShape("audio/webm", 4_000, "v2")))
+        // A side that names no video is no difference.
+        assertFalse(StreamShape("audio/webm", 4_000, "v1").differsFrom(StreamShape("audio/webm", 4_000)))
+        // A saved head of one video never meets another video's bytes, even
+        // of the same type and length.
+        val store = Store().apply { kept["k"] = StreamShape("audio/webm", 4_000, "v1") }
+        val other = mapOf("Content-Type" to listOf("audio/webm"), "Content-Range" to listOf("bytes 100-3999/4000"), "x-octo-video" to listOf("v2"))
+        try {
+            ShapeGuardDataSource(Server(other), { it.scheme == STREAM_SCHEME }, store).open(spec(position = 100, key = "k"))
+            fail("another video must not be read on")
+        } catch (e: StreamChanged) {
+            assertEquals(listOf("k"), store.dropped)
+        }
+    }
+
+    @Test
     fun aFindsPlayerItemGoesByTheBytes() {
         assertNull(playerMimeType("audio/mp4", sniffed = true))
         assertEquals("audio/flac", playerMimeType("audio/flac", sniffed = false))
@@ -159,5 +178,33 @@ class StreamShapesTest {
         // No answer: the listed type. A made MP3 is what it is.
         assertEquals(StreamRequest(null) to "audio/mp4", deviceMediaFor(StreamRequest(null), "audio/mp4", null, playsFlac))
         assertEquals(StreamRequest(320) to "audio/mpeg", deviceMediaFor(StreamRequest(320), "audio/flac", null, playsFlac))
+    }
+
+    // A later part refused with 503 (the kept copy the play read is gone):
+    // the saved copy goes and the song opens again. From the first byte a
+    // 503 is the server's refusal as it is, and the song fails as before.
+    @Test
+    fun aRefusedLaterPartLetsTheSavedCopyGoAndOpensTheSongAgain() {
+        val store = Store().apply { kept["k"] = StreamShape("audio/flac", 31_000_000) }
+        val refusing = object : DataSource by Server(preview) {
+            override fun open(dataSpec: DataSpec): Long =
+                throw androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException(
+                    503, "Service Unavailable", null, emptyMap(), dataSpec, ByteArray(0),
+                )
+        }
+        val guard = ShapeGuardDataSource(refusing, { true }, store)
+        try {
+            guard.open(spec(position = 1_000_000, key = "k"))
+            fail("a refused later part opens the song again")
+        } catch (e: StreamChanged) {
+            // what the service reopens the song on
+        }
+        assertEquals(listOf("k"), store.dropped)
+        try {
+            guard.open(spec(position = 0, key = "k"))
+            fail("a refusal from the first byte stays a refusal")
+        } catch (e: androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException) {
+            assertEquals(503, e.responseCode)
+        }
     }
 }

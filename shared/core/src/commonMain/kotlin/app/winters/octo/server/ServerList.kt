@@ -1,6 +1,8 @@
 package app.winters.octo.server
 
+import app.winters.octo.connection.GatewayWords
 import app.winters.octo.livelists.accountKey
+import app.winters.octo.subsonic.gateway.Gateway
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 // The servers both apps keep, several at once with one in use: what each is
@@ -11,15 +13,24 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 // long it took.
 data class ServerCheck(val reach: Reach, val ms: Long? = null)
 
-enum class Reach {
-    Answers,
+sealed interface Reach {
+    data object Answers : Reach
 
     // It is there, but did not take the saved password.
-    WrongPassword,
-    Unreachable,
+    data object WrongPassword : Reach
+
+    data object Unreachable : Reach
 
     // Signed out, so not asked.
-    Unknown,
+    data object Unknown : Reach
+
+    // A sign-in page in front of the server answered in its place.
+    // `loginSent`: the saved sign-in for it went along and it said no.
+    data class SignInPage(val gateway: Gateway, val loginSent: Boolean) : Reach
+
+    // Kept with a sign-in page's password for a plain http address outside
+    // the home network, where the app never sends it.
+    data object NeedsHttps : Reach
 }
 
 // What a server is called: the name the listener gave it, else its host.
@@ -33,7 +44,9 @@ fun accountLine(username: String, address: String): String {
 }
 
 // A server's quiet status in its row: what it is, and how it answered.
-// The one in use shows only its kind here; the rest is said below the list.
+// The one in use shows only its kind here, the rest being said below the
+// list, unless its sign-in page needs https or turns it away, which
+// nothing else says.
 fun statusLine(
     serverType: String?,
     serverVersion: String?,
@@ -46,6 +59,8 @@ fun statusLine(
     return when {
         switching -> "Switching to it now"
         signedOut -> "Signed out. Sign in again to use it."
+        check?.reach == Reach.NeedsHttps -> "$kind · ${GatewayWords.ROW_NEEDS_HTTPS}"
+        check != null && check.reach is Reach.SignInPage -> "$kind · ${GatewayWords.row(check.reach.gateway, check.reach.loginSent)}"
         inUse || check == null || check.reach == Reach.Unknown -> kind
         check.reach == Reach.Answers -> listOfNotNull(kind, check.ms?.let(::answerWords)).joinToString(" · ")
         check.reach == Reach.WrongPassword -> "$kind · Didn't take the saved password"
@@ -54,7 +69,26 @@ fun statusLine(
 }
 
 // Whether a row's status line is a warning.
-fun ServerCheck?.isWarning(): Boolean = this?.reach == Reach.Unreachable || this?.reach == Reach.WrongPassword
+fun ServerCheck?.isWarning(): Boolean = when (this?.reach) {
+    Reach.Unreachable, Reach.WrongPassword, Reach.NeedsHttps, is Reach.SignInPage -> true
+    else -> false
+}
+
+// The short words for a warning on its own, as the account card shows it:
+// the sign-in page by name when it is the trouble. Null when all is well.
+fun ServerCheck?.troubleWords(): String? = when (val reach = this?.reach) {
+    Reach.Unreachable -> "Can't reach"
+    Reach.WrongPassword -> "Didn't take the saved password"
+    Reach.NeedsHttps -> GatewayWords.ROW_NEEDS_HTTPS
+    is Reach.SignInPage -> GatewayWords.row(reach.gateway, reach.loginSent)
+    else -> null
+}
+
+// Whether a row's status line shows as a warning. The one in use warns
+// only that its sign-in page needs https or turns it away; its other
+// troubles are said below the list.
+fun ServerCheck?.warnsInRow(inUse: Boolean): Boolean =
+    isWarning() && (!inUse || this?.reach == Reach.NeedsHttps || this?.reach is Reach.SignInPage)
 
 // The notice once another server is in use, and plainly when music was
 // stopped for it. Null when nothing was in use before.

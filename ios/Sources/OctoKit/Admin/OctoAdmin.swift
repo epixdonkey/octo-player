@@ -5,18 +5,21 @@ import FoundationNetworking
 
 // MARK: What Octo's admin pages answer
 
-/// What Octo says about itself or one service it works with.
+/// What Octo says about itself or one service it works with. `action` is what Octo offers to do
+/// about it on its full admin pages, such as "pass" for Mornye's check.
 public struct AdminHealth: Sendable, Equatable {
     public var ok = false
     public var detail = ""
     public var warning = false
     public var configured = true
+    public var action: String?
 
-    public init(ok: Bool = false, detail: String = "", warning: Bool = false, configured: Bool = true) {
+    public init(ok: Bool = false, detail: String = "", warning: Bool = false, configured: Bool = true, action: String? = nil) {
         self.ok = ok
         self.detail = detail
         self.warning = warning
         self.configured = configured
+        self.action = action
     }
 
     init(_ json: Any?) {
@@ -25,6 +28,7 @@ public struct AdminHealth: Sendable, Equatable {
         detail = AdminJSON.string(object["detail"]) ?? ""
         warning = AdminJSON.bool(object["warning"]) ?? false
         configured = AdminJSON.bool(object["configured"]) ?? true
+        action = AdminJSON.string(object["action"])
     }
 }
 
@@ -70,9 +74,13 @@ public struct DownloadRecord: Sendable, Equatable {
     public var sizeBytes: Int64 = 0
     public var downloadedAt = ""
     public var requestedBy: [String] = []
+    /// Where Octo serves the cover (read from the song's file, else from the address saved with
+    /// it), as a path on the admin pages' own address. Older servers name none.
+    public var cover: String?
 
     public init(artist: String = "", title: String = "", album: String = "", format: String = "", source: String = "",
-                coverArtUrl: String? = nil, sizeBytes: Int64 = 0, downloadedAt: String = "", requestedBy: [String] = []) {
+                coverArtUrl: String? = nil, sizeBytes: Int64 = 0, downloadedAt: String = "", requestedBy: [String] = [],
+                cover: String? = nil) {
         self.artist = artist
         self.title = title
         self.album = album
@@ -82,6 +90,7 @@ public struct DownloadRecord: Sendable, Equatable {
         self.sizeBytes = sizeBytes
         self.downloadedAt = downloadedAt
         self.requestedBy = requestedBy
+        self.cover = cover
     }
 
     init(_ json: Any?) {
@@ -95,12 +104,34 @@ public struct DownloadRecord: Sendable, Equatable {
         sizeBytes = AdminJSON.int(object["sizeBytes"]) ?? 0
         downloadedAt = AdminJSON.string(object["downloadedAt"]) ?? ""
         requestedBy = (object["requestedBy"] as? [Any])?.compactMap { AdminJSON.string($0) } ?? []
+        cover = AdminJSON.string(object["cover"])
     }
 
     static func list(_ data: Data) throws -> [DownloadRecord] {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AdminJSON.notObject }
         return (object["downloads"] as? [Any] ?? []).map(DownloadRecord.init)
     }
+}
+
+/// A download as the app shows it: its cover from the address Octo serves it at, on the admin
+/// pages' own address and signed like every admin call (`sign`). A server that names none (an
+/// older one), or names another host, keeps the cover address the log saved.
+func withServedCover(_ record: DownloadRecord, base: URL, sign: (URL) -> URL) -> DownloadRecord {
+    guard let path = record.cover, path.hasPrefix("/"), !path.hasPrefix("//"),
+          let served = URL(string: path, relativeTo: base)?.absoluteURL
+    else { return record }
+    var shown = record
+    shown.coverArtUrl = sign(served).absoluteString
+    return shown
+}
+
+/// Whether a picture the admin pages name is the server's own: at one of its addresses, or where
+/// its admin pages answer. Those come through the server's connection (`ServerExchange.media`);
+/// any other is an outside picture, fetched with nothing of the server's.
+public func isServerPicture(_ url: URL, client: SubsonicClient, adminBase: URL?) -> Bool {
+    if client.scope.covers(url) { return true }
+    guard let adminBase, let origin = ServerAddress.origin(url) else { return false }
+    return origin == ServerAddress.origin(adminBase)
 }
 
 /// How far Octo's stations have learned one listener's taste.
@@ -405,12 +436,12 @@ public final class OctoAdmin: @unchecked Sendable {
         let ownKeys = Set(own.compactMap(rootKey))
         setTrust(signIn.server, ownKeys)
         let saved = lastFound(signIn)
-        var found = await first([client.baseURL, signIn.primary] + [saved].compactMap { $0 }, tried: &tried, session: client.session)
+        var found = await first([client.baseURL, signIn.primary] + [saved].compactMap { $0 }, tried: &tried, client: client)
         if found == nil {
             // The station addresses cost a server call, so they are only asked for last.
             let announced = await stationHosts(client).compactMap(adminRoot)
             setTrust(signIn.server, ownKeys.union(announced.compactMap(rootKey)))
-            found = await first(announced, tried: &tried, session: client.session)
+            found = await first(announced, tried: &tried, client: client)
         }
         guard let found else { return nil }
         store.set(found.absoluteString, Self.addressKey(signIn.server))
@@ -430,10 +461,10 @@ public final class OctoAdmin: @unchecked Sendable {
         return (store.string(Self.addressKey(signIn.server)) ?? older).flatMap(URL.init(string:))
     }
 
-    private func first(_ candidates: [URL], tried: inout Set<String>, session: URLSession) async -> URL? {
+    private func first(_ candidates: [URL], tried: inout Set<String>, client: SubsonicClient) async -> URL? {
         for candidate in candidates {
             guard let root = adminRoot(candidate), let key = rootKey(root), tried.insert(key).inserted else { continue }
-            if await answers(root, session: session) { return root }
+            if await answers(root, client: client) { return root }
         }
         return nil
     }
@@ -443,13 +474,13 @@ public final class OctoAdmin: @unchecked Sendable {
     }
 
     /// Whether Octo's status page answers at a root: unsigned, since it asks addresses that may
-    /// not be Octo.
-    private func answers(_ root: URL, session: URLSession) async -> Bool {
+    /// not be Octo, and through the client's connection, whose headers and sign-in page cookies
+    /// go only as far as the server's own addresses.
+    private func answers(_ root: URL, client: SubsonicClient) async -> Bool {
         let request = URLRequest(url: Self.api(root, "status"), timeoutInterval: probeTimeout)
         let answered = try? await Self.within(probeTimeout) { () async throws -> Bool in
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            let answer = try await ServerExchange.answer(for: request, client: client)
+            guard answer.isOK, let object = try? JSONSerialization.jsonObject(with: answer.data) as? [String: Any] else { return false }
             return object["octo"] != nil
         }
         return answered ?? false
@@ -469,7 +500,8 @@ public final class OctoAdmin: @unchecked Sendable {
     }
 
     public func downloads(_ base: URL, _ signIn: AdminSignIn?) async throws -> [DownloadRecord] {
-        try await get(base, "downloads", signIn) { try DownloadRecord.list($0) }
+        let records = try await get(base, "downloads", signIn) { try DownloadRecord.list($0) }
+        return records.map { record in withServedCover(record, base: base) { sign($0, signIn) } }
     }
 
     public func radio(_ base: URL, _ signIn: AdminSignIn?) async throws -> RadioState {
@@ -490,22 +522,16 @@ public final class OctoAdmin: @unchecked Sendable {
         request.httpBody = body
         request.setValue("1", forHTTPHeaderField: "X-Octo-Admin")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        headers(for: request.url, signIn).forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
-        let response: URLResponse
-        do {
-            (_, response) = try await (signIn.client.session).data(for: request)
-        } catch {
-            throw AdminUnavailable("Octo did not answer")
-        }
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw AdminUnavailable("HTTP \(http.statusCode) from lastfm/radio/refresh")
-        }
+        let answer = try await call(request, signIn.client)
+        if !answer.isOK { throw AdminUnavailable("HTTP \(answer.status) from lastfm/radio/refresh") }
     }
 
-    /// The full admin pages, for everything the app does not show.
-    public static func pageUrl(_ base: URL) -> URL? {
+    /// The full admin pages, for everything the app does not show, opened at the card `section`
+    /// names, as in "/admin/#spotiflac", or at the top with none.
+    public static func pageUrl(_ base: URL, section: String? = nil) -> URL? {
         guard var parts = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
         parts.percentEncodedPath = "/admin/"
+        parts.fragment = section
         return parts.url
     }
 
@@ -516,24 +542,29 @@ public final class OctoAdmin: @unchecked Sendable {
             parts.queryItems = query.map { URLQueryItem(name: $0.0, value: $0.1) }
             address = parts.url ?? address
         }
-        var request = URLRequest(url: sign(address, signIn), timeoutInterval: callTimeout)
-        headers(for: request.url, signIn).forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
-        let session = signIn?.client.session ?? .shared
-        let (data, response): (Data, URLResponse)
+        guard let signIn else { throw AdminUnavailable("Not signed in") }
+        let request = URLRequest(url: sign(address, signIn), timeoutInterval: callTimeout)
+        let answer = try await call(request, signIn.client)
+        if answer.status == 403 { throw AdminUnavailable("Needs a Navidrome admin account") }
+        if !answer.isOK { throw AdminUnavailable("HTTP \(answer.status) from \(path)") }
         do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw AdminUnavailable("Octo did not answer")
-        }
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 403 { throw AdminUnavailable("Needs a Navidrome admin account") }
-            if !(200..<300).contains(http.statusCode) { throw AdminUnavailable("HTTP \(http.statusCode) from \(path)") }
-        }
-        do {
-            return try read(data)
+            return try read(answer.data)
         } catch {
             throw AdminUnavailable("Octo answered in a way the app does not understand")
         }
+    }
+
+    /// One admin call through the server's own connection: its headers as far as the server's
+    /// addresses go, and its sign-in page's cookies. A sign-in page in front of the server says so.
+    private func call(_ request: URLRequest, _ client: SubsonicClient) async throws -> ServerAnswer {
+        let answer: ServerAnswer
+        do {
+            answer = try await ServerExchange.answer(for: request, client: client)
+        } catch {
+            throw AdminUnavailable("Octo did not answer")
+        }
+        if let gateway = answer.gateway { throw AdminUnavailable(GatewayWords.failure(gateway, loginSent: answer.loginSent)) }
+        return answer
     }
 
     static func api(_ base: URL, _ path: String) -> URL {
@@ -548,13 +579,6 @@ public final class OctoAdmin: @unchecked Sendable {
     func sign(_ url: URL, _ signIn: AdminSignIn?) -> URL {
         guard let signIn, carries(url, signIn) else { return url }
         return signIn.client.signed(url)
-    }
-
-    /// The server's own headers go where its sign-in goes; elsewhere only who is asking.
-    private func headers(for url: URL?, _ signIn: AdminSignIn?) -> [String: String] {
-        guard let signIn else { return [:] }
-        guard let url, carries(url, signIn) else { return ["User-Agent": signIn.client.userAgent] }
-        return signIn.client.headers
     }
 
     private func carries(_ url: URL, _ signIn: AdminSignIn) -> Bool {
@@ -599,8 +623,21 @@ public func serviceName(_ key: String) -> String {
     case "lidarr": "Lidarr"
     case "ytDlpShim": "Streaming helper"
     case "lastfm": "Last.fm"
+    case "mornye": "Mornye (SpotiFLAC)"
+    case "sonic": "octo-sonic"
+    case "catalog": "Music catalog"
     default: key
     }
+}
+
+/// The button under a service whose fix waits on the full admin pages.
+public let passOnDashboardText = "Pass on the dashboard"
+
+/// The card on the full admin pages a service's row leads to, or nil when it leads nowhere:
+/// Mornye's row, while Octo offers to pass its check there. An action this app does not know,
+/// or on another row, is left out.
+public func dashboardSection(_ key: String, _ health: AdminHealth) -> String? {
+    key == "mornye" && health.action == "pass" ? "spotiflac" : nil
 }
 
 /// How long ago, the way a person says it: "Just now", "5 min ago", "Yesterday", then the date.

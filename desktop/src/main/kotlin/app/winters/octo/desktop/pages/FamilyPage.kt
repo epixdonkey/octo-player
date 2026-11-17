@@ -102,8 +102,8 @@ import app.winters.octo.ui.family.requestKindLine
 import app.winters.octo.ui.family.requestSheet
 import app.winters.octo.ui.family.requestStateLine
 import app.winters.octo.ui.family.requestTitle
-import app.winters.octo.ui.family.storageLine
-import app.winters.octo.ui.family.storageShare
+import app.winters.octo.ui.family.libraryRow
+import app.winters.octo.ui.family.memberStorageLine
 import app.winters.octo.ui.family.weeklyLine
 import kotlinx.coroutines.launch
 
@@ -124,7 +124,7 @@ fun FamilyPage(app: AppState, visit: Visit) {
             visit,
             FAMILY,
             listOf(
-                PageSection("plan", MY_PLAN, OctoIcons.Family) {
+                PageSection("plan", MY_PLAN, OctoIcons.Plan) {
                     Rows { SettingRow(if (model.problem == null) "Reading" else "Not here right now", model.problem ?: "Asking the server about your plan.") }
                 },
             ),
@@ -139,14 +139,14 @@ fun FamilyPage(app: AppState, visit: Visit) {
     val sections = model.sections().map { section ->
         when (section) {
             FamilySection.Login -> PageSection("login", YOUR_LOGIN, OctoIcons.Key, detail = model.login?.username) { LoginSection(app, model) }
-            FamilySection.Plan -> PageSection("plan", MY_PLAN, OctoIcons.Family, detail = planTitle(me)) { PlanSection(model, me) }
+            FamilySection.Plan -> PageSection("plan", MY_PLAN, OctoIcons.Plan, detail = planTitle(me)) { PlanSection(model, me) }
             FamilySection.Saved -> PageSection("saved", SAVED, OctoIcons.Like, detail = savedDetail(model)) { SavedSection(app, model, me) }
             FamilySection.Requests -> PageSection("requests", REQUESTS, OctoIcons.Downloading, detail = requestsDetail(model.requests)) { RequestsSection(model) }
             FamilySection.Devices -> PageSection("devices", DEVICES, OctoIcons.Device, detail = plural(model.devices.size, "device")) { DevicesSection(app, model) }
             FamilySection.Members -> PageSection("members", MEMBERS, OctoIcons.Family, detail = membersDetail(info.manager?.members.orEmpty(), info.manager?.liveStreams ?: 0)) {
                 MembersSection(model, info.manager?.members.orEmpty())
             }
-            FamilySection.Inbox -> PageSection("inbox", REQUESTS_WAITING, OctoIcons.Check, detail = if (model.inbox.isEmpty()) "None waiting" else "${model.inbox.size} waiting") {
+            FamilySection.Inbox -> PageSection("inbox", REQUESTS_WAITING, OctoIcons.Hourglass, detail = if (model.inbox.isEmpty()) "None waiting" else "${model.inbox.size} waiting") {
                 InboxSection(model)
             }
         }
@@ -186,11 +186,12 @@ private fun PlanSection(model: FamilyModel, me: FamilyMe) {
     val can = me.abilities
     Rows {
         Column(Modifier.fillMaxWidth().padding(horizontal = RowInset, vertical = Space.L), verticalArrangement = Arrangement.spacedBy(Space.S)) {
+            val library = libraryRow(me)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Txt("Your library", DesktopType.body, modifier = Modifier.weight(1f))
-                Txt(storageLine(me.storageUsedBytes, can.storageLimitGb), DesktopType.meta, OctoColors.TextSecondary)
+                Txt(library.title, DesktopType.body, modifier = Modifier.weight(1f))
+                library.value?.let { Txt(it, DesktopType.meta, OctoColors.TextSecondary) }
             }
-            storageShare(me.storageUsedBytes, can.storageLimitGb)?.let { MeterLine(it) }
+            library.share?.let { MeterLine(it) }
         }
         if (can.weeklyRequestLimit > 0 || me.requestsThisWeek > 0) {
             SettingRow("Requests this week", weeklyLine(me.requestsThisWeek, can.weeklyRequestLimit))
@@ -283,7 +284,7 @@ private fun DevicesSection(app: AppState, model: FamilyModel) {
                 RowAction("Show QR code", { showHandOver(popups, app, model) }, icon = OctoIcons.QrCode)
             }
             SettingRow(SIGN_OUT_EVERYWHERE, SIGN_OUT_EVERYWHERE_LINE) {
-                RowAction(CHANGE_PASSWORD, { changePassword(app) })
+                RowAction(CHANGE_PASSWORD, { changePassword(app) }, enabled = !app.changingPassword)
             }
         }
     }
@@ -321,7 +322,7 @@ private fun LoginSection(app: AppState, model: FamilyModel) {
             CopyButton(login.username, "Copy username", ::copyText)
         }
         SettingRow("Password", PASSWORD_LINE) {
-            RowAction(CHANGE_PASSWORD, { changePassword(app) })
+            RowAction(CHANGE_PASSWORD, { changePassword(app) }, enabled = !app.changingPassword)
         }
         SettingRow(HANDOVER_TITLE, "A QR code your phone or another computer scans to sign in with this login.") {
             RowAction("Show QR code", { showHandOver(popups, app, model) }, icon = OctoIcons.QrCode)
@@ -333,7 +334,7 @@ private fun LoginSection(app: AppState, model: FamilyModel) {
             loginSteps(main, login.username).forEach { app ->
                 val expanded = open == app.app
                 SettingRow(app.app, if (expanded) null else app.steps.first(), Modifier.clickable { open = if (expanded) null else app.app }) {
-                    Glyph(if (expanded) OctoIcons.Expand else OctoIcons.Collapse, size = 16.dp, tint = OctoColors.TextMuted)
+                    Glyph(if (expanded) OctoIcons.Expand else OctoIcons.Collapse, size = IconSize.Table, tint = OctoColors.TextMuted)
                 }
                 if (expanded) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = RowInset, vertical = Space.M), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -376,7 +377,7 @@ private fun MembersSection(model: FamilyModel, members: List<FamilyMember>) {
     Rows {
         if (members.isEmpty()) SettingRow("No members yet", "Add someone below. They get a QR code or a link to sign up.")
         members.forEach { member ->
-            ItemRow(member.displayName.ifBlank { member.username }, "${memberLine(member)} · ${storageLine(member.storageUsedBytes, member.storageLimitGb)}") {
+            ItemRow(member.displayName.ifBlank { member.username }, "${memberLine(member)} · ${memberStorageLine(member)}") {
                 RowAction(RESET_PASSWORD, { askToReset(popups, model, member) }, enabled = !model.working)
             }
         }
@@ -486,6 +487,7 @@ private fun ItemRow(title: String, line: String, state: FamilyRequest? = null, c
     }
 }
 
+@Composable
 private fun stateColor(state: FamilyRequestState) = when (state) {
     FamilyRequestState.Done -> OctoColors.SignalGreen
     FamilyRequestState.Declined, FamilyRequestState.Failed -> OctoColors.SignalOrange

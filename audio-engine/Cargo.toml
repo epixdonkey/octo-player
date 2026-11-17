@@ -12,6 +12,11 @@ name = "octo_audio"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
+# Keeps NVIDIA's game overlay off Octo; Octo runs it as an administrator.
+name = "octo-nvidia"
+path = "src/bin/octo-nvidia.rs"
+
+[[bin]]
 # Writes the Kotlin bindings from the built library.
 name = "uniffi-bindgen"
 path = "tools/uniffi-bindgen.rs"
@@ -25,9 +30,10 @@ opus = ["dep:opus-decoder", "dep:symphonia-core"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-# id3v2 and ape read the tags MP3 files carry (ReplayGain, tempo).
+# id3v2 and ape read the tags MP3 files carry (ReplayGain, tempo). mkv reads
+# WebM, which YouTube serves some songs found online as (Opus inside).
 symphonia = { version = "0.6.1", default-features = false, features = [
-    "flac", "mp3", "aac", "isomp4", "alac", "vorbis", "ogg", "wav", "aiff", "pcm", "opt-simd", "id3v2", "ape",
+    "flac", "mp3", "aac", "isomp4", "alac", "vorbis", "ogg", "wav", "aiff", "pcm", "opt-simd", "id3v2", "ape", "mkv",
 ] }
 opus-decoder = { version = "0.1.1", optional = true }
 # Named directly for the codec registration macro.
@@ -55,7 +61,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi",
     "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage",
     "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Performance",
-    "Win32_System_Diagnostics_ToolHelp",    "Win32_System_Variant",
+    "Win32_System_Diagnostics_ToolHelp",    "Win32_System_Variant", "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

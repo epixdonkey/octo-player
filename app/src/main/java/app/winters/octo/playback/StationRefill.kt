@@ -21,11 +21,22 @@ import javax.inject.Singleton
 // down for a station's songs while this keeps them going.
 @OptIn(UnstableApi::class)
 @Singleton
-class StationRefill @Inject constructor(
-    private val discovery: Discovery,
-    private val playable: PlayableSongs,
+class StationRefill internal constructor(
+    // Whether the server sends a station's next songs.
+    private val keepsStationsGoing: () -> Boolean,
+    // A station's next songs' ids, none of `after`.
+    private val stationMore: suspend (String, List<String>) -> List<String>,
+    // The songs the player can play, for ids.
+    private val playable: suspend (List<String>) -> List<MediaItem>,
 ) {
+    @Inject constructor(discovery: Discovery, playable: PlayableSongs) : this(
+        { discovery.keepsStationsGoing },
+        { id, after -> discovery.stationMore(id, after).map { it.id } },
+        playable::items,
+    )
+
     private var player: OutputSwitch? = null
+    private var window: QueueWindow? = null
     private var scope: CoroutineScope? = null
     private var job: Job? = null
 
@@ -38,8 +49,9 @@ class StationRefill @Inject constructor(
     // Told when a top-up brought nothing, so Autoplay can look again.
     private var settled: () -> Unit = {}
 
-    fun attach(player: OutputSwitch, scope: CoroutineScope, settled: () -> Unit = {}) {
+    fun attach(player: OutputSwitch, scope: CoroutineScope, window: QueueWindow? = null, settled: () -> Unit = {}) {
         this.player = player
+        this.window = window
         this.scope = scope
         this.settled = settled
         askedAfter = null
@@ -50,6 +62,7 @@ class StationRefill @Inject constructor(
         job?.cancel()
         job = null
         player = null
+        window = null
         scope = null
         settled = {}
         askedAfter = null
@@ -59,11 +72,14 @@ class StationRefill @Inject constructor(
     // Whether the song is a station's that this keeps going, so Autoplay
     // leaves it be.
     fun keepsGoing(item: MediaItem?): Boolean =
-        item?.queueSource is QueueSource.Station && discovery.keepsStationsGoing && item.entryId != emptyAfter
+        item?.queueSource is QueueSource.Station && keepsStationsGoing() && item.entryId != emptyAfter
 
     fun check() {
         val player = player ?: return
-        if (job?.isActive == true || !discovery.keepsStationsGoing || player.repeatMode != Player.REPEAT_MODE_OFF) return
+        if (job?.isActive == true || !keepsStationsGoing() || player.repeatMode != Player.REPEAT_MODE_OFF) return
+        // Only once the queue's end is in the player: never at the edge of
+        // a window of a longer queue, nor while a list is still added.
+        if (window?.atLogicalEnd == false) return
         val items = List(player.mediaItemCount) { player.getMediaItemAt(it) }
         val current = player.currentMediaItemIndex
         if (current !in items.indices) return
@@ -87,14 +103,17 @@ class StationRefill @Inject constructor(
 
     private suspend fun topUp(player: OutputSwitch, station: QueueSource.Station, last: String, after: List<String>) {
         val songs = try {
-            discovery.stationMore(station.id, after)
+            stationMore(station.id, after)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w("Octo", "station top-up failed: ${e.javaClass.simpleName}")
             emptyList()
         }
-        val items = playable.items(songs.map { it.id }.filterNot { it in after }).map { it.withSource(station) }
+        // A song the queue holds anywhere, past the window too, is not added again.
+        val ids = songs.filterNot { it in after }
+        val queued = window?.queuedAmong(ids).orEmpty()
+        val items = playable(ids.filterNot { it in queued }).map { it.withSource(station) }
         // Only while the queue still ends as it did.
         val stillLast = lastToPlay(player) == last
         if (items.isEmpty() || !stillLast) {
@@ -105,13 +124,31 @@ class StationRefill @Inject constructor(
             Log.i("Octo", "station top-up: nothing added")
             return
         }
-        val first = player.mediaItemCount
-        player.addMediaItems(first, items)
-        // The last song already ended while the server answered: carry on.
-        if (player.playbackState == Player.STATE_ENDED) {
-            player.seekTo(first, 0)
-            player.play()
+        // The add is the app's own upkeep: while a blend is under way it waits,
+        // and goes only if the queue still ends as it did then.
+        player.upkeep {
+            if (lastToPlay(player) != last) {
+                Log.i("Octo", "station top-up: nothing added, the queue changed")
+                return@upkeep
+            }
+            // A song queued meanwhile (Play next, say) is not added again: the
+            // queue's end is in the player, so its own songs are read here as
+            // the add goes.
+            val window = window
+            val queuedNow = List(player.mediaItemCount) { player.getMediaItemAt(it).mediaId }.toHashSet()
+            val adding = items.filterNot { it.mediaId in queuedNow }
+            if (adding.isEmpty()) {
+                Log.i("Octo", "station top-up: nothing added, all queued meanwhile")
+                return@upkeep
+            }
+            val first = player.mediaItemCount
+            if (window != null) window.addAtEnd(adding, autoplay = false, source = station.encoded()) else player.addMediaItems(first, adding)
+            // The last song already ended while the server answered: carry on.
+            if (player.playbackState == Player.STATE_ENDED) {
+                player.seekTo(first, 0)
+                player.play()
+            }
+            Log.i("Octo", "station top-up: added ${adding.size}")
         }
-        Log.i("Octo", "station top-up: added ${items.size}")
     }
 }

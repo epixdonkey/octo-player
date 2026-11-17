@@ -56,8 +56,7 @@ internal const val LINK_KEY = "Software\\Classes\\octo"
 
 // The desktop entry for the installed program. The package keeps its icon
 // beside the program: /opt/octo/bin/Octo has /opt/octo/lib/Octo.png.
-fun linuxDesktopEntry(program: String): String {
-    val icon = program.substringBeforeLast('/').substringBeforeLast('/') + "/lib/Octo.png"
+fun linuxDesktopEntry(program: String, icon: String = packageIcon(program)): String {
     val types = (AUDIO_TYPES + "x-scheme-handler/octo").joinToString(";", postfix = ";")
     return """
         [Desktop Entry]
@@ -76,9 +75,38 @@ fun linuxDesktopEntry(program: String): String {
 // when it differs, and makes Octo the handler for octo:// links. Audio files
 // only gain "Open with Octo"; the listener's usual player stays the default.
 // True once written.
-fun registerWithLinuxDesktop(program: String, applications: java.io.File, makeDefault: Boolean = true): Boolean {
+fun registerWithLinuxDesktop(
+    program: String,
+    applications: java.io.File,
+    makeDefault: Boolean = true,
+    env: (String) -> String? = System::getenv,
+): Boolean {
+    // A Flatpak exports its own entry, which starts Octo in its sandbox and
+    // claims the files and links; the program inside it can't be run from
+    // outside.
+    if (inFlatpak(env)) return true
+    // An AppImage unpacked by hand has no file of its own to start again.
+    if (inUnpackedAppImageFolder(program, env)) return true
+    // An AppImage's files go away when it quits, so the entry starts the
+    // AppImage file itself (which an update replaces in place), and its
+    // icon is copied out beside the user's other icons.
+    val appImage = runningAppImage(program, env)
+    val icon = if (appImage == null) {
+        packageIcon(program)
+    } else {
+        val kept = java.io.File(applications.parentFile, "icons/hicolor/512x512/apps/$APP_ICON")
+        val copied = runCatching {
+            val source = java.io.File(packageIcon(program))
+            if (!kept.isFile || kept.length() != source.length()) {
+                kept.parentFile.mkdirs()
+                source.copyTo(kept, overwrite = true)
+            }
+        }
+        if (copied.isFailure) return false
+        kept.path
+    }
     val entry = java.io.File(applications, LINUX_ENTRY)
-    val text = linuxDesktopEntry(program)
+    val text = linuxDesktopEntry(appImage?.file?.path ?: program, icon)
     if (entry.isFile && runCatching { entry.readText() }.getOrNull() == text) return true
     return runCatching {
         applications.mkdirs()
@@ -100,6 +128,23 @@ fun linuxApplicationsFolder(env: (String) -> String? = System::getenv, home: Str
 
 // The package's entry name, which the media controls announce too.
 private const val LINUX_ENTRY = "octo-Octo.desktop"
+
+// The icon jpackage keeps beside the program: /opt/octo/bin/Octo has
+// /opt/octo/lib/Octo.png.
+private fun packageIcon(program: String): String = program.substringBeforeLast('/').substringBeforeLast('/') + "/lib/Octo.png"
+
+// The AppImage's icon, as kept in the user's own icons.
+private const val APP_ICON = "app.winters.octo.png"
+
+// Whether this Octo runs inside a Flatpak, which exports its own desktop
+// entry and is kept up to date by Flatpak.
+fun inFlatpak(env: (String) -> String? = System::getenv): Boolean = !env("FLATPAK_ID").isNullOrBlank()
+
+// The desktop entry Octo runs from, without ".desktop": the Flatpak's id
+// inside one, else the packages' entry. The media controls and notices name
+// it, so the desktop shows Octo's own name and icon beside them.
+fun linuxDesktopId(env: (String) -> String? = System::getenv): String =
+    env("FLATPAK_ID")?.takeIf(String::isNotBlank) ?: LINUX_ENTRY.removeSuffix(".desktop")
 
 // The audio types the installers associate with Octo.
 private val AUDIO_TYPES = listOf("audio/mpeg", "audio/flac", "audio/mp4", "audio/aac", "audio/ogg", "audio/opus", "audio/wav", "audio/aiff")

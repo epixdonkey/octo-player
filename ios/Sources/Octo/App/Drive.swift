@@ -53,6 +53,16 @@ import UIKit
 /// - `settings:PAGE`, `settings:PAGE@ROW`, `settings-search:TEXT`, `popup:ROW`, `whatsnew`,
 ///   `settings-state:NAME`: see `SettingsNavigator.drive`
 /// - `account:WHAT`: the account pages, sheets, sign-in modes and ways in; see `AccountDrive`
+/// - `keychainProbe` checks the keychain's in-place update on a scratch item and leaves none behind
+///   (see `KeychainProbe`)
+/// - `signin:STATE` opens the sign-in page in a sign-in page state, with sample values only:
+///   `signin:plain`, `signin:authentik`, `signin:cloudflare`, `signin:saved`, `signin:https`,
+///   `signin:join`, `signin:tall` (a sign-in page group taller than the screen at the largest text
+///   sizes), each also as `STATE@end`, scrolled to the page's end, and `signin:key` (Add a server
+///   scrolled to its end, then API key picked, so the key row comes back into view); see
+///   `GatewayDrive`
+/// - `servers:rows` opens Server and sync with two sample rows after the kept servers: one a
+///   sign-in page turned away, one that needs https
 @MainActor
 enum Drive {
     static func run(session: Session, player: Player, router: Router, motion: MotionSettings,
@@ -112,6 +122,9 @@ enum Drive {
                 if let strength = AmbientStrength(rawValue: value.capitalized) { ambience?.setStrength(strength) }
             case "sound": SoundDrive.run(value, router: router)
             case "settings", "settings-search", "popup", "whatsnew", "settings-state": await SettingsNavigator.shared.drive(name, value, router: router)
+            case "signin": GatewayDrive.signIn(value, router: router)
+            case "servers": await GatewayDrive.servers(value, router: router)
+            case "keychainProbe": KeychainProbe.run()
             case "list":
                 guard let client = session.client,
                       let list = try? await client.playlists().first(where: { $0.name.caseInsensitiveCompare(value) == .orderedSame }),
@@ -186,6 +199,33 @@ enum Drive {
     }
 }
 
+/// The keychain's in-place update, checked on the phone with a scratch item alone: no server,
+/// certificate or trust is touched, and nothing is left behind. One log line per step, with its
+/// result only.
+@MainActor
+enum KeychainProbe {
+    private static let account = "octo-walk-probe"
+    private static let log = Logger(subsystem: "app.winters.octo", category: "keychain-probe")
+
+    static func run() {
+        // A probe stopped earlier may have left the item, and keychain items outlive a reinstall.
+        Keychain.delete(for: account)
+        line("cleared", Keychain.lookup(for: account) == .missing)
+        line("added", Keychain.saveData(Data("first".utf8), for: account))
+        line("marked", Keychain.probeMark(for: account))
+        line("updated", Keychain.saveData(Data("second".utf8), for: account))
+        line("label kept", Keychain.probeLabel(for: account))
+        line("second value", Keychain.readData(for: account) == Data("second".utf8))
+        if case .found = Keychain.lookup(for: account) { line("found", true) } else { line("found", false) }
+        Keychain.delete(for: account)
+        line("gone", Keychain.lookup(for: account) == .missing)
+    }
+
+    private static func line(_ step: String, _ ok: Bool) {
+        log.info("keychain probe \(step, privacy: .public): \(ok, privacy: .public)")
+    }
+}
+
 /// The system sheet and question as the drive steps show them.
 @MainActor
 enum DriveSamples {
@@ -202,7 +242,7 @@ enum DriveSamples {
                         overlays.hideSheet(id)
                         router.done("Sleeping in \(item)")
                     } label: {
-                        Text(item).font(.octoBodySmall).foregroundStyle(.white)
+                        Text(item).font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary)
                             .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                             .padding(.horizontal, 20)
                             .contentShape(Rectangle())
@@ -229,12 +269,134 @@ enum DriveSamples {
     }
 }
 
+/// The sign-in page in each state a sign-in page in front of the server leaves it, and the
+/// servers list's rows for one. Every value is a sample ("example"), held in memory only:
+/// nothing goes to the keychain, the settings or the kept servers.
+@MainActor
+enum GatewayDrive {
+    private static let address = "music.example.com"
+
+    /// Opens the sign-in page in `state`; an unknown state opens nothing. `STATE@end` opens it
+    /// scrolled to its end, where the sign-in page fields are.
+    static func signIn(_ step: String, router: Router) {
+        let state = step.hasSuffix("@end") ? String(step.dropLast(4)) : step
+        var form: SignInModel.Form = .signIn
+        var then: ((SignInModel) -> Void)?
+        let sample: (SignInModel) -> Void
+        switch state {
+        case "plain":
+            // Add a server, Advanced open, the sign-in page section at None.
+            form = .add
+            sample = { model in
+                model.label = "Example"
+                model.rest = address
+                model.username = "example"
+                model.advancedOpen = true
+            }
+        case "authentik":
+            // As a sign-in left it after Authentik answered in the server's place.
+            sample = { model in
+                model.rest = address
+                model.username = "example"
+                model.driveSample(met: .authentik, words: GatewayWords.failure(.authentik, loginSent: false))
+            }
+        case "cloudflare":
+            sample = { model in
+                model.rest = address
+                model.username = "example"
+                model.driveSample(met: .cloudflareAccess, words: GatewayWords.failure(.cloudflareAccess, loginSent: false))
+            }
+        case "saved":
+            // An edit of a kept server whose sign-in page fields are saved.
+            form = .edit(StoredServer(id: "drive-sample-saved", label: "Example", address: URL(string: "https://\(address)")!,
+                                      username: "example"))
+            sample = { model in model.driveSample(saved: .password) }
+        case "https":
+            // A plain http address across the internet with the sign-in page fields filled.
+            sample = { model in
+                model.rest = "http://\(address)"
+                model.username = "example"
+                model.pickGateway(.password)
+                model.gatewayFirst = "example"
+                model.gatewaySecond = "example"
+                model.advancedOpen = true
+            }
+        case "join":
+            sample = { model in
+                model.rest = address
+                model.startJoin()
+                model.advancedOpen = true
+            }
+        case "tall":
+            // As a sign-in left it after an unknown sign-in page answered: its words are the
+            // longest, so at the largest text sizes the group is taller than the screen.
+            sample = { model in
+                model.rest = address
+                model.username = "example"
+                model.driveSample(met: .signInPage, words: GatewayWords.failure(.signInPage, loginSent: false))
+            }
+        case "key":
+            // Add a server with Advanced open, scrolled to its end; then API key is picked with no
+            // key kept, so the key row in the main card comes back into view.
+            form = .add
+            sample = { model in
+                model.label = "Example"
+                model.rest = address
+                model.username = "example"
+                model.advancedOpen = true
+            }
+            then = { model in model.pickMethod(.apiKey) }
+        default:
+            return
+        }
+        SignInView.sampleOnOpen = sample
+        SignInView.endOnOpen = state != step || then != nil
+        SignInView.thenOnOpen = then
+        router.signIn = form
+    }
+
+    /// `rows`: Server and sync with two sample rows after the kept servers.
+    static func servers(_ state: String, router: Router) async {
+        guard state == "rows" else { return }
+        ServersSection.sample = [
+            (StoredServer(id: "drive-sample-authentik", label: "Example behind Authentik", address: URL(string: "https://\(address)")!,
+                          username: "example", serverType: "navidrome", serverVersion: "0.58.0"),
+             ServerCheck(.signInPage(.authentik, loginSent: true))),
+            (StoredServer(id: "drive-sample-https", label: "Example over http", address: URL(string: "http://example.net")!,
+                          username: "example", serverType: "navidrome", serverVersion: "0.58.0"),
+             ServerCheck(.needsHttps)),
+        ]
+        await SettingsNavigator.shared.drive("settings", SettingsPage.server.rawValue, router: router)
+    }
+}
+
+/// The sign-in page's callout as a device step reads it, one log line each: a visible height it
+/// read beside UIKit's own for the key window, where it scrolled, and that it finished.
+@MainActor
+enum CalloutLog {
+    private static let log = Logger(subsystem: "app.winters.octo", category: "callout")
+
+    static func height(_ visible: Double) {
+        let window = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first
+        let uikit = window.map { Double($0.safeAreaLayoutGuide.layoutFrame.height) } ?? -1
+        log.info("callout height visible=\(visible, privacy: .public) uikit=\(uikit, privacy: .public)")
+    }
+
+    static func scroll(_ target: CalloutTarget) {
+        log.info("callout scroll \(String(describing: target), privacy: .public)")
+    }
+
+    static func shown(wasUp: Bool) {
+        log.info("callout shown wasUp=\(wasUp, privacy: .public)")
+    }
+}
+
 private struct OctoSwitchRow: View {
     @State private var on = false
 
     var body: some View {
         HStack {
-            Text("Fade out at the end").font(.octoBodySmall).foregroundStyle(.white)
+            Text("Fade out at the end").font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary)
             Spacer()
             OctoSwitch(isOn: $on, label: "Fade out at the end")
         }
@@ -340,12 +502,11 @@ enum CoverTiming {
             for size in [600, 128, 600] {
                 var request = URLRequest(url: client.coverURL(coverId, size: size))
                 request.cachePolicy = .reloadIgnoringLocalCacheData
-                for (name, value) in client.headers { request.setValue(value, forHTTPHeaderField: name) }
                 let start = Date()
-                let answer = try? await client.session.data(for: request)
+                let answer = try? await ServerExchange.answer(for: request, client: client)
                 let ms = Int(Date().timeIntervalSince(start) * 1000)
-                let bytes = answer?.0.count ?? 0
-                let status = (answer?.1 as? HTTPURLResponse)?.statusCode ?? 0
+                let bytes = answer?.data.count ?? 0
+                let status = answer?.status ?? 0
                 log.notice("cover \(size) \(ms) ms \(bytes) bytes status \(status) \(name, privacy: .public)")
             }
         }

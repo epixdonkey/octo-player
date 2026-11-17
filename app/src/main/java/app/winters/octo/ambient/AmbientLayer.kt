@@ -52,6 +52,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.navigation3.runtime.NavKey
 import app.winters.octo.design.GlazeTint
+import app.winters.octo.design.LocalOctoSurfaces
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoType
 import app.winters.octo.playback.NowPlaying
@@ -60,6 +61,9 @@ import app.winters.octo.player.ArtworkPalette
 import app.winters.octo.player.MESH
 import app.winters.octo.player.PlayerColors
 import app.winters.octo.player.PlayerSettings
+import app.winters.octo.theme.LocalActiveTheme
+import app.winters.octo.theme.ThemeChoice
+import app.winters.octo.theme.glowForCover
 import app.winters.octo.ui.common.rememberSystemReduceMotion
 import app.winters.octo.ui.common.delayToNextTick
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -72,7 +76,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-// How long one song's colours take to become the next's.
+// How long one song's colors take to become the next's.
 private const val CrossfadeMs = 800
 
 // The glow drifts at a fifth of the player's pace. A field this faint and
@@ -86,12 +90,12 @@ fun driftFrameMs(alpha: Float): Long = if (alpha > ambientAlpha(AmbientStrength.
 
 // Toward the bottom the glow fades to 60%, so the lists and the bar sit on
 // the quietest part.
-private val BottomFade = Brush.verticalGradient(
+private fun bottomFade(page: Color) = Brush.verticalGradient(
     0.35f to Color.Transparent,
-    1f to OctoColors.Background.copy(alpha = 0.4f),
+    1f to page.copy(alpha = 0.4f),
 )
 
-// The settings and colours the glow is made from.
+// The settings and colors the glow is made from.
 @HiltViewModel
 class AmbienceViewModel @Inject constructor(
     private val settings: PlayerSettings,
@@ -112,7 +116,7 @@ class AmbienceViewModel @Inject constructor(
         .distinctUntilChanged()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    // The same colours the full player uses, from the same cache.
+    // The same colors the full player uses, from the same cache.
     suspend fun colorsFor(artwork: String?): PlayerColors = palette.colorsFor(artwork)
 
     fun setStrength(strength: AmbientStrength) {
@@ -155,10 +159,11 @@ fun PageArtwork(route: NavKey, artwork: String?) {
     }
 }
 
-// The glow behind every page: the artwork's colours, faint and dark, above
-// the plain background and under the page. It drifts only while music plays,
-// the app is in view and nothing covers it (awake), and never when the
-// phone's animations are off.
+// The glow behind every page: the artwork's colors, faint and kept
+// readable, above the plain background and under the page. It drifts only
+// while music plays, the app is in view and nothing covers it (awake), and
+// never when the phone's animations are off. With nothing with artwork to
+// feed it, the theme's own colors rest there, still.
 @Composable
 fun AmbientBackdrop(
     route: NavKey?,
@@ -169,7 +174,7 @@ fun AmbientBackdrop(
 ) {
     val prefs by vm.prefs.collectAsStateWithLifecycle()
     val source = ambientSource(prefs, route, pages.artworkFor(route), now.trackId != null, now.artwork)
-    // Kept through a turn to none, so the old colours fade out as they are.
+    // Kept through a turn to none, so the old colors fade out as they are.
     val colors by produceState<PlayerColors?>(null, source) {
         when (source) {
             AmbientSource.None -> Unit
@@ -177,14 +182,19 @@ fun AmbientBackdrop(
             is AmbientSource.Page -> value = vm.colorsFor(source.artwork)
         }
     }
-    val strength = if (source == AmbientSource.None) 0f else ambientAlpha(prefs?.strength ?: AmbientStrength.Off)
+    val theme = LocalActiveTheme.current
+    val glow = LocalOctoSurfaces.current.glow
+    val accent = OctoColors.Accent.toArgb()
+    val look = remember(prefs, route, source, theme, glow, colors, accent) {
+        ambientLook(prefs, areaOf(route), source, theme, glow.map { it.toArgb() }, colors?.mesh?.map { it.toArgb() }, accent)
+    }
     val appCalm by vm.reduceMotion.collectAsStateWithLifecycle()
     val reduceMotion = rememberSystemReduceMotion() || appCalm
-    AmbientField(colors, strength, moving = awake && now.isPlaying && !reduceMotion)
+    AmbientField(look.mesh, look.alpha, moving = ambientMoves(awake, now.isPlaying, reduceMotion, look.rests))
 }
 
 // The film for the floating bar's glass: the plain one, or with a trace of
-// the song's main colour when the bar is chosen to glow.
+// the song's main color when the bar is chosen to glow.
 @Composable
 fun rememberBarFilm(now: NowPlaying, vm: AmbienceViewModel = hiltViewModel()): State<Color> {
     val prefs by vm.prefs.collectAsStateWithLifecycle()
@@ -192,13 +202,21 @@ fun rememberBarFilm(now: NowPlaying, vm: AmbienceViewModel = hiltViewModel()): S
     val colors by produceState<PlayerColors?>(null, now.artwork, strength) {
         value = if (strength == null) null else vm.colorsFor(now.artwork)
     }
-    val target = colors?.let { c -> strength?.let { barFilm(c.mesh[0], it) } } ?: GlazeTint
+    val plain = GlazeTint
+    val theme = LocalActiveTheme.current
+    val accent = OctoColors.Accent.toArgb()
+    val target = colors?.let { c -> strength?.let { barFilm(c.mesh[0], it, plain, theme, accent) } } ?: plain
     return animateColorAsState(target, tween(CrossfadeMs), label = "bar film")
 }
 
-// A trace of a colour over the glass's usual dim film.
-fun barFilm(color: Color, strength: AmbientStrength): Color =
-    Color(ambientColor(color.toArgb())).copy(alpha = barTintAlpha(strength)).compositeOver(GlazeTint)
+// A trace of a color over the glass's usual dim film, `plain`: held dark
+// and soft on a dark theme; on a light one kept readable as the glow is,
+// `accent` (the accent drawn now) too.
+fun barFilm(color: Color, strength: AmbientStrength, plain: Color, theme: ThemeChoice = ThemeChoice.Octo, accent: Int? = null): Color {
+    val alpha = barTintAlpha(strength)
+    val tint = if (theme.light) glowForCover(theme, color.toArgb(), perMille(alpha), accent) else ambientColor(color.toArgb())
+    return Color(tint).copy(alpha = alpha).compositeOver(plain)
+}
 
 // A strip in Settings showing the glow at a strength, with the song on now
 // written over it the way a page's text sits on it.
@@ -206,6 +224,16 @@ fun barFilm(color: Color, strength: AmbientStrength): Color =
 fun AmbientPreview(strength: AmbientStrength, modifier: Modifier = Modifier, vm: AmbienceViewModel = hiltViewModel()) {
     val now by vm.now.collectAsStateWithLifecycle()
     val colors by produceState<PlayerColors?>(null, now.artwork) { value = vm.colorsFor(now.artwork) }
+    val theme = LocalActiveTheme.current
+    val glow = LocalOctoSurfaces.current.glow
+    val alpha = ambientAlpha(strength)
+    val accent = OctoColors.Accent.toArgb()
+    // With nothing playing the theme's own colors show, or the quiet ones
+    // for a theme with none.
+    val mesh = remember(colors, theme, glow, alpha, now.trackId == null, accent) {
+        val resting = if (now.trackId == null) restingGlow(theme, glow.map { it.toArgb() }, alpha, accent) else emptyList()
+        resting.ifEmpty { null } ?: colors?.mesh?.let { m -> coverMesh(theme, m.map { it.toArgb() }, alpha, accent) }
+    }
     Box(
         modifier
             .fillMaxWidth()
@@ -213,7 +241,7 @@ fun AmbientPreview(strength: AmbientStrength, modifier: Modifier = Modifier, vm:
             .clip(RoundedCornerShape(14.dp))
             .background(OctoColors.Background),
     ) {
-        AmbientField(colors, ambientAlpha(strength), moving = false)
+        AmbientField(mesh, alpha, moving = false)
         Column(Modifier.align(Alignment.CenterStart).padding(horizontal = 16.dp)) {
             Text(
                 now.title ?: "Nothing playing",
@@ -223,28 +251,30 @@ fun AmbientPreview(strength: AmbientStrength, modifier: Modifier = Modifier, vm:
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                if (now.title != null) now.artist.orEmpty() else "The glow takes its colors from the song on now.",
+                if (now.title != null) now.artist.orEmpty() else "The glow takes its colors from the song on now, or the theme's while nothing plays.",
                 style = OctoType.caption,
                 color = OctoColors.TextSecondary,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
     }
 }
 
-// The colour field itself, in a layer of its own: new frames redraw only
+// The color field itself, in a layer of its own: new frames redraw only
 // this layer, and only its drawing reads the moving values, so the page over
 // it is never recomposed or redrawn for it.
 @Composable
-private fun AmbientField(colors: PlayerColors?, strength: Float, moving: Boolean, modifier: Modifier = Modifier) {
-    val target = remember(colors) { (colors ?: PlayerColors.Quiet).mesh.map { Color(ambientColor(it.toArgb())) } }
+private fun AmbientField(mesh: List<Int>?, strength: Float, moving: Boolean, modifier: Modifier = Modifier) {
+    val target = remember(mesh) { mesh?.map(::Color) ?: PlayerColors.Quiet.mesh.map { Color(ambientColor(it.toArgb())) } }
     val c0 = animateColorAsState(target[0], tween(CrossfadeMs), label = "ambient 0")
     val c1 = animateColorAsState(target[1], tween(CrossfadeMs), label = "ambient 1")
     val c2 = animateColorAsState(target[2], tween(CrossfadeMs), label = "ambient 2")
     val c3 = animateColorAsState(target[3], tween(CrossfadeMs), label = "ambient 3")
-    val glow = animateFloatAsState(if (colors == null) 0f else strength, tween(CrossfadeMs), label = "ambient glow")
+    val glow = animateFloatAsState(if (mesh == null) 0f else strength, tween(CrossfadeMs), label = "ambient glow")
     val painter = remember { fieldPainter() }
+    val page = OctoColors.Background
+    val fade = remember(page) { bottomFade(page) }
 
     val time = remember { mutableFloatStateOf(0f) }
     if (moving && strength > 0f && painter.moves) {
@@ -272,12 +302,12 @@ private fun AmbientField(colors: PlayerColors?, strength: Float, moving: Boolean
                 val alpha = glow.value
                 if (alpha <= 0.002f) return@drawBehind
                 with(painter) { paint(c0.value, c1.value, c2.value, c3.value, time.floatValue, alpha) }
-                drawRect(BottomFade)
+                drawRect(fade)
             },
     )
 }
 
-// Draws the four colours as a field.
+// Draws the four colors as a field.
 private interface FieldPainter {
     val moves: Boolean
     fun DrawScope.paint(c0: Color, c1: Color, c2: Color, c3: Color, time: Float, alpha: Float)
@@ -304,7 +334,7 @@ private class MeshPainter : FieldPainter {
     }
 }
 
-// A still diagonal blend of the same colours, for older phones.
+// A still diagonal blend of the same colors, for older phones.
 private class GradientPainter : FieldPainter {
     override val moves = false
 

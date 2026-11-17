@@ -169,7 +169,7 @@ struct AlbumView: View {
                 }
                 .onAppear { coverShown = true }
                 .onDisappear { coverShown = false }
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                .octoShadow(0.35, radius: 10, y: 4)
                 .frame(maxWidth: .infinity)
             Text(album.title)
                 .font(.octoTitle)
@@ -230,10 +230,12 @@ struct AlbumView: View {
         if !serverOnly.isEmpty {
             let held = serverOnly.filter { state.kept($0.id) != nil }.count
             let done = serverOnly.filter { state.kept($0.id)?.status == .done }.count
+            // The page's songs outside the library, as its library note counts them.
+            let outside = finds.isEmpty ? 0 : max(0, (whole ?? tracks).count - tracks.count)
             Button {
                 state.offline.download(serverOnly.map(\.id))
             } label: {
-                Label(albumDownloadLabel(songs: serverOnly.count, held: held, done: done),
+                Label(albumDownloadLabel(songs: serverOnly.count, held: held, done: done, outside: outside),
                       systemImage: (held < serverOnly.count ? OctoIcon.download : (done < serverOnly.count ? .downloading : .downloaded)).symbol)
             }
             .disabled(held >= serverOnly.count)
@@ -328,7 +330,7 @@ private struct OnlineAlbum: View {
                 }
                 .onAppear { coverShown = true }
                 .onDisappear { coverShown = false }
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                .octoShadow(0.35, radius: 10, y: 4)
             Text(album.name).font(.octoTitle).multilineTextAlignment(.center).bigTitle().padding(.top, 20)
             Text(album.byline).font(.octoBody).foregroundStyle(OctoColor.textSecondary).padding(.top, 4)
             PlayButtons(songs: album.song).padding(.top, 14)
@@ -526,7 +528,7 @@ struct ArtistView: View {
             SectionTitle("About").padding(.top, 8)
             Text(text)
                 .font(.octoBodySmall)
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(OctoInkColor.primary)
                 .lineLimit(moreAbout ? nil : 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background {
@@ -546,7 +548,7 @@ struct ArtistView: View {
             if aboutClipped && !moreAbout {
                 Button("More") { moreAbout = true }
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(OctoColor.textPrimary)
                     .buttonStyle(.plain)
                     .padding(.vertical, 8)
                     .padding(.horizontal, 20)
@@ -597,6 +599,10 @@ struct PlaylistsView: View {
     @State private var serverIds: [String: String] = [:]
     @State private var importing = false
     @State private var importNote: ImportNote?
+    /// Whether the Library upkeep group is open, on this phone; closed until opened.
+    @AppStorage("playlists.upkeepOpen") private var upkeepOpen = false
+
+    private var folders: PlaylistFolderStore { state.data.folders }
 
     /// How the last import went, until the page closes.
     struct ImportNote {
@@ -611,6 +617,7 @@ struct PlaylistsView: View {
         let claimed = Set(octoGroups.flatMap { $0.lists.map(\.id) })
         let gone = discovery.goneLists
         let shown = sortPlaylists(playlists ?? [], order).filter { !claimed.contains(serverIds[$0.id] ?? $0.id) }
+        let rows = playlistPageRows(shown, key: \.placeKey, upkeep: { $0.upkeep != nil }, tree: folders.offered ? folders.tree : nil, folder: nil)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -621,6 +628,9 @@ struct PlaylistsView: View {
                             // The ways to make a list, in the order the page once listed them.
                             GlassMoreMenu(icon: .addToLibrary, label: "New") {
                                 Button("New playlist", systemImage: OctoIcon.addToLibrary.symbol) { actions.askNewPlaylist(.tracks([])) }
+                                if folders.offered {
+                                    Button(PlaylistFolderWords.newFolder, systemImage: OctoIcon.playlistFolder.symbol) { actions.askNewFolder(in: nil) }
+                                }
                                 Button { router.go(.liveListEditor(id: nil)) } label: {
                                     Label {
                                         Text("New live list")
@@ -643,19 +653,12 @@ struct PlaylistsView: View {
                         .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: OctoRadius.row))
                         .contextMenu { LiveListOptionsItems(list: list) }
                     }
-                    ForEach(shown) { playlist in
-                        NavigationLink(value: Route.library(.playlist(id: playlist.id))) {
-                            PlaylistLine(name: playlist.name,
-                                         subtitle: playlist.family ? "By Family · \(songsCount(playlist.songCount))" : songsCount(playlist.songCount),
-                                         onServer: playlist.onServer) {
-                                PlaylistCover(playlist: playlist, size: 56)
-                            }
-                        }
-                        .buttonStyle(SqueezeStyle())
-                        .id(playlist.id)
-                        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: OctoRadius.row))
-                        .contextMenu { CollectionMenuItems(subject: .playlist(playlist)) }
-                    }
+                    // Folders A to Z, a gap, the playlists in no folder, then Octo's library upkeep
+                    // lists in a group of their own, closed until opened.
+                    ForEach(rows.folders) { entry in PlaylistFolderNavRow(entry: entry) }
+                    if !rows.folders.isEmpty && !rows.playlists.isEmpty { Color.clear.frame(height: 16) }
+                    ForEach(rows.playlists) { playlist in PlaylistNavRow(playlist: playlist) }
+                    if !rows.upkeep.isEmpty { UpkeepGroup(lists: rows.upkeep, open: $upkeepOpen) }
                     fromOcto
                 }
                 .padding(.bottom, 20)
@@ -860,7 +863,7 @@ struct ServerListPage: View {
         let details = [songsCount(songs.count), seconds > 0 ? asLength(seconds) : nil].compactMap { $0 }.joined(separator: " · ")
         return VStack(spacing: 0) {
             Cover(id: playlist.coverArt, size: 240, radius: 10)
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                .octoShadow(0.35, radius: 10, y: 4)
             Text(playlist.name).font(.octoTitle).multilineTextAlignment(.center).bigTitle().padding(.top, 20)
             Text(details)
                 .font(.octoCaption)
@@ -919,7 +922,7 @@ struct PlaylistPage: View {
     private var reordering: Bool { editMode.isEditing }
 
     /// Whether songs can be taken out here: not from a family playlist unless the listener is known not to hear only clean songs.
-    private func takesOut(_ playlist: PlaylistSummary) -> Bool { !playlist.family || playlist.familyMayRemove }
+    private func takesOut(_ playlist: PlaylistSummary) -> Bool { (!playlist.family || playlist.familyMayRemove) && !playlist.octoImport }
 
     var body: some View {
         LibraryList {
@@ -966,7 +969,7 @@ struct PlaylistPage: View {
         let length = Int(tracks.reduce(0) { $0 + $1.durationMs } / 1_000)
         VStack(spacing: 0) {
             PlaylistCover(playlist: playlist, size: 240, radius: 10)
-                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                .octoShadow(0.35, radius: 10, y: 4)
             Text(playlist.name).font(.octoTitle).multilineTextAlignment(.center).bigTitle().padding(.top, 20)
             HStack(spacing: 8) {
                 Text(playlistDetails(songs: rows.count, length: asLength(length),
@@ -976,7 +979,7 @@ struct PlaylistPage: View {
                     .foregroundStyle(OctoColor.textMuted)
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if rows.count > 1 && !playlist.family { ReorderButton(editMode: $editMode) }
+                if rows.count > 1 && !playlist.family && !playlist.octoImport { ReorderButton(editMode: $editMode) }
                 Menu {
                     KeepDownloadedToggle(tracks: tracks, playlistId: playlist.id)
                     PlaylistOptionsItems(playlist: playlist, serverOnly: tracks.contains { !$0.onPhone && !$0.isFound }) { dismiss() }

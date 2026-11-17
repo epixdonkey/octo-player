@@ -14,7 +14,31 @@ private let longDashes: [Character] = ["\u{2014}", "\u{2013}"]
         let ids = SettingsIndex.all.map(\.id)
         #expect(ids.count == Set(ids).count)
         #expect(SettingsIndex.all.allSatisfy { !$0.title.trimmingCharacters(in: .whitespaces).isEmpty })
-        #expect(SettingsIndex.byId("crossfade") == SettingsIndex.crossfade)
+        #expect(SettingsIndex.byId("crossfade") == SettingsIndex.betweenSongs)
+    }
+
+    @Test func searchLeavesOutTheUpdaterWhileItIsOff() {
+        let off = searchSettings("update", in: SettingsIndex.searchable(updaterOn: false)).map(\.id)
+        #expect(off.allSatisfy { !SettingsIndex.updaterRows.contains($0) }, "\(off)")
+        let on = searchSettings("update", in: SettingsIndex.searchable(updaterOn: true)).map(\.id)
+        #expect(SettingsIndex.updaterRows.isSubset(of: Set(on)), "\(on)")
+        #expect(SettingsIndex.updaterRows == ["check_updates", "early_versions", "check_now"])
+    }
+
+    @Test func betweenSongsKeepsTheCrossfadeRowsIds() {
+        // Between songs keeps the id the Crossfade switch had; Crossfade's length keeps its id
+        // under its new title; Smart transitions is gone, its words folded into Between songs.
+        #expect(SettingsIndex.betweenSongs.id == "crossfade")
+        #expect(SettingsIndex.betweenSongs.title == "Between songs")
+        #expect(SettingsIndex.byId("crossfade_length")?.title == "Length")
+        #expect(SettingsIndex.byId("smart_transitions") == nil)
+        #expect(!SettingsIndex.all.contains { $0.title == "Smart transitions" || $0.title == "Longest blend" })
+        for words in ["crossfade", "gapless", "automix", "blend", "mix", "transition", "dj", "smart transitions", "between songs"] {
+            #expect(titles(words).contains("Between songs"), "\(words)")
+        }
+        #expect(titles("smart transitions").first == "Between songs")
+        #expect(titles("automix").first == "Between songs")
+        #expect(titles("longest blend").first == "Length")
     }
 
     @Test func everyPageHasSettings() {
@@ -38,12 +62,13 @@ private let longDashes: [Character] = ["\u{2014}", "\u{2013}"]
     }
 
     @Test func theTitleComesFirst() {
-        #expect(Array(titles("crossfade").prefix(2)) == ["Crossfade", "Crossfade curve"])
-        #expect(titles("CROSS").first == "Crossfade")
+        #expect(Array(titles("crossfade").prefix(3)) == ["Crossfade curve", "Between songs", "Length"])
+        #expect(titles("CROSS").first == "Crossfade curve")
+        #expect(titles("between").first == "Between songs")
     }
 
     @Test func otherWordsFindASetting() {
-        #expect(titles("gapless").first == "Crossfade")
+        #expect(titles("gapless").first == "Between songs")
         #expect(titles("semitones").first == "Speed")
         #expect(titles("tempo").contains("Speed"))
         #expect(titles("replaygain").contains("Loudness"))

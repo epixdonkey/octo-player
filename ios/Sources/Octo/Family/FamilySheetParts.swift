@@ -116,7 +116,7 @@ struct QrPlaceholder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .fill(Color.white.opacity(0.06))
+            .fill(OctoColor.textPrimary.opacity(0.06))
             .frame(width: side, height: side)
             .accessibilityElement()
             .accessibilityLabel(label ?? "")
@@ -132,27 +132,40 @@ struct SheetHeader: View {
     var name: String?
     let title: String
     let subtitle: String
-    var subtitleColor: Color = OctoColor.textMuted
+    /// The line under the title; nil takes the theme's muted words.
+    var subtitleColor: Color?
     var clock = true
+    /// Whether Close can be pressed: a sheet turns it off while a request of its own runs.
+    var closeEnabled = true
     let close: () -> Void
 
+    private var subtitleStyle: AnyShapeStyle {
+        if let subtitleColor { return AnyShapeStyle(subtitleColor) }
+        return AnyShapeStyle(OctoColor.textMuted)
+    }
+
+    /// The title's cap middle above its baseline: half the cap height of its 22 bold.
+    private let capMiddle: CGFloat = 7.75
+
     var body: some View {
-        HStack(spacing: 12) {
+        // The avatar and Close center on the title's first line, however many lines follow it.
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             if let name {
                 let initial = name.trimmingCharacters(in: .whitespacesAndNewlines).first.map { String($0).uppercased() } ?? "?"
                 Text(initial)
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(OctoColor.textPrimary)
                     .frame(width: 40, height: 40)
-                    .background(OctoColor.accentSelected, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.1)))
+                    .octoSelectedFill(Circle())
+                    .overlay(Circle().strokeBorder(OctoInkColor.quaternary))
                     .accessibilityHidden(true)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + capMiddle }
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.system(size: 22, weight: .bold)).foregroundStyle(OctoColor.textPrimary).accessibilityAddTraits(.isHeader)
                 HStack(spacing: 5) {
-                    if clock { Image(systemName: "timer").font(.system(size: 11)).foregroundStyle(subtitleColor) }
-                    Text(subtitle).font(.octoCaption).foregroundStyle(subtitleColor)
+                    if clock { Image(systemName: "timer").font(.system(size: 11)).foregroundStyle(subtitleStyle) }
+                    Text(subtitle).font(.octoCaption).foregroundStyle(subtitleStyle)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -160,7 +173,10 @@ struct SheetHeader: View {
                 Image(systemName: "xmark").font(.system(size: 16, weight: .semibold)).foregroundStyle(OctoColor.textMuted).frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
+            .opacity(closeEnabled ? 1 : OctoInkColor.disabled)
+            .disabled(!closeEnabled)
             .accessibilityLabel("Close")
+            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + capMiddle }
         }
         .padding(.leading, 20)
         .padding(.trailing, 8)
@@ -177,6 +193,7 @@ struct SheetScrollArea<Content: View>: View {
     var startAt: String?
     @ViewBuilder var content: Content
     @State private var moreBelow = false
+    @Environment(\.octoPalette) private var palette
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -198,7 +215,7 @@ struct SheetScrollArea<Content: View>: View {
             .overlay(alignment: .bottom) {
                 if moreBelow {
                     ZStack(alignment: .bottom) {
-                        LinearGradient(colors: [.clear, OctoColor.background.opacity(0.9)], startPoint: .top, endPoint: .bottom)
+                        LinearGradient(colors: [.clear, palette.color(.background).opacity(0.9)], startPoint: .top, endPoint: .bottom)
                             .frame(height: 56)
                             .allowsHitTesting(false)
                         Button {
@@ -217,7 +234,7 @@ struct SheetScrollArea<Content: View>: View {
                             .foregroundStyle(OctoColor.textPrimary)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(OctoColor.accentSelected, in: Capsule())
+                            .octoSelectedFill(Capsule())
                             .overlay(Capsule().strokeBorder(OctoColor.hairline))
                         }
                         .buttonStyle(.plain)
@@ -304,7 +321,7 @@ struct CopyButton: View {
             } label: {
                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 17))
-                    .foregroundStyle(copied ? OctoColor.signalGreen : OctoColor.textPrimary)
+                    .foregroundStyle(copied ? AnyShapeStyle(OctoColor.signalGreen) : AnyShapeStyle(OctoColor.textPrimary))
                     .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
@@ -400,7 +417,7 @@ struct ReachChooser: View {
 
     private func option(_ choice: LinkReach, icon: String) -> some View {
         let chosen = reach == choice
-        let ink = chosen ? OctoColor.background : OctoColor.textSecondary
+        let ink = chosen ? OctoColor.onAccent : OctoColor.textSecondary
         return Button { pick(choice) } label: {
             HStack(spacing: 6) {
                 Image(systemName: icon).font(.system(size: 16, weight: .medium))
@@ -412,8 +429,8 @@ struct ReachChooser: View {
             .padding(.trailing, 18)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, minHeight: 48)
-            .background(chosen ? OctoColor.accent : .clear, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(chosen ? .clear : OctoColor.hairline))
+            .background(chosen ? AnyShapeStyle(OctoColor.accent) : AnyShapeStyle(Color.clear), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(chosen ? AnyShapeStyle(Color.clear) : AnyShapeStyle(OctoColor.hairline)))
             .overlay(alignment: .topTrailing) {
                 if chosen { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(ink).padding(5) }
             }

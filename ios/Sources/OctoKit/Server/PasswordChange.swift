@@ -11,6 +11,10 @@ public struct PasswordDraft: Sendable, Equatable {
         self.new = new
         self.confirm = confirm
     }
+
+    /// All three are typed in: until then the form's main button is off. What is wrong with what
+    /// is typed (the new ones not matching, the same password as now) is said when it is pressed.
+    public var filled: Bool { !current.isEmpty && !new.isEmpty && !confirm.isEmpty }
 }
 
 /// What keeps the form from being sent, in plain words, or nil when it can go. Nothing is asked
@@ -62,12 +66,14 @@ public func changeOwnPassword(_ client: SubsonicClient, current: String, new: St
 }
 
 private func passwordFailure(_ error: Error) -> PasswordChange {
+    // A sign-in page in front of the server that answered in its place says so in its own words.
+    if let words = GatewayWords.failureFor(error) { return .failed(words) }
     let failure = SubsonicError(error)
     switch failure {
     case .server(50, _): return .notAllowed
     // A server that ignored the form body misses the new password.
     case .server(10, _): return .notOffered
-    case .notSubsonic(_, let status?) where [404, 405, 501].contains(status): return .notOffered
+    case .notSubsonic(_, let status?, _, _) where [404, 405, 501].contains(status): return .notOffered
     case .unreachable: return .failed("Couldn't reach the server, so nothing changed. Try again in a moment.")
     case .notSubsonic where failure.serverBusy:
         return .failed("The server isn't answering right now, so nothing changed. Try again in a moment.")
@@ -108,7 +114,3 @@ public func legacyRetry(_ error: Error?, mode: AuthMode, url: URL) -> LegacyRetr
     guard mode == .token, let error, case .authNotSupported(41, _) = SubsonicError(error) else { return .none }
     return url.scheme?.lowercased() == "https" || ServerAddress.isPrivate(url) ? .retry : .unsafe
 }
-
-/// Said when a server needs the password itself over plain http outside the home network.
-public let legacyUnsafeMessage =
-    "This server needs the password sent as it is, which isn't safe over http. Use https, or turn on Legacy sign-in under Advanced."

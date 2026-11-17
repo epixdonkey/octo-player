@@ -2,6 +2,12 @@ package app.winters.octo.ui.nav
 
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import app.winters.octo.ui.family.FamilyShellViewModel
+import app.winters.octo.ui.signin.SignInShellViewModel
+import app.winters.octo.ui.signin.SignInRunning
+import app.winters.octo.connection.SignInWords
+import app.winters.octo.data.KeptServers
+import app.winters.octo.data.SessionState
+import app.winters.octo.data.SignInAsk
 import app.winters.octo.ui.family.FamilyRequestSheetHost
 import app.winters.octo.ui.family.FamilyScreen
 import app.winters.octo.subsonic.familyAppLink
@@ -35,6 +41,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -55,6 +62,7 @@ import app.winters.octo.ambient.LocalPageArtworks
 import app.winters.octo.ambient.PageArtworks
 import app.winters.octo.ambient.rememberBarFilm
 import app.winters.octo.design.OctoColors
+import app.winters.octo.design.OverArt
 import app.winters.octo.design.StatusGlaze
 import app.winters.octo.device.DeviceLibrary
 import app.winters.octo.playback.PlaybackConnection
@@ -76,6 +84,7 @@ import app.winters.octo.ui.common.LocalHaze
 import app.winters.octo.ui.common.LocalNowPlayingId
 import app.winters.octo.ui.common.LocalOpenPage
 import app.winters.octo.ui.common.LocalPressSpot
+import app.winters.octo.ui.common.OverlayLayer
 import app.winters.octo.ui.common.PressSpot
 import app.winters.octo.ui.common.pressSpot
 import app.winters.octo.ui.common.NowMark
@@ -107,6 +116,7 @@ import app.winters.octo.ui.playlist.PlaylistSheetsHost
 import app.winters.octo.ui.livelists.LiveListEditScreen
 import app.winters.octo.ui.livelists.LiveListScreen
 import app.winters.octo.ui.playlist.PlaylistsScreen
+import app.winters.octo.ui.playlist.PlaylistFolderScreen
 import app.winters.octo.ui.search.SearchScreen
 import app.winters.octo.ui.search.SearchShellViewModel
 import app.winters.octo.ui.server.LocalShareSheet
@@ -175,15 +185,27 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
     // join form filled in, on the Settings tab.
     val familyHub = hiltViewModel<FamilyShellViewModel>().hub
     val familyOpen by familyHub.opens.collectAsStateWithLifecycle()
+    // Each opening of a family link counts, so it is a page of its own: the
+    // same link opened again starts again, and a page drawn again does not.
+    // Saved, so a page restored with opening N is never reused for the next.
+    var joinOpens by rememberSaveable { mutableLongStateOf(0L) }
+    // The sign-in forms open anywhere in the app, and the sessions, which
+    // ask for a kept server's sign-in form by themselves.
+    val running = hiltViewModel<SignInShellViewModel>().running
+    val sessions = hiltViewModel<SignInShellViewModel>().sessions
     LaunchedEffect(familyOpen) {
         val what = familyOpen ?: return@LaunchedEffect
         familyHub.opened()
-        selected = stacks.lastIndex
-        stacks.last().add(
-            when (what) {
-                FamilyOpen.Family -> FamilyRoute
-                is FamilyOpen.Join -> FamilyJoinRoute(familyAppLink(what.link))
-            },
+        routeFamilyOpen(
+            what,
+            running,
+            feedback,
+            reopen = { familyHub.open(it) },
+            select = { selected = stacks.lastIndex },
+            nextOpening = { ++joinOpens },
+            stack = stacks.last(),
+            askAgain = { sessions.ask(it) },
+            nameOf = { askName(it, sessions.servers.value, sessions.state.value) },
         )
     }
     // A list shared to Octo: Import, on the Settings tab, which sends it.
@@ -194,11 +216,26 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
         selected = stacks.lastIndex
         if (stacks.last().lastOrNull() != ImportRoute) stacks.last().add(ImportRoute)
     }
-    val back: () -> Unit = { stack.removeLastOrNull() }
+    // A kept server's sign-in form the sessions ask for (one that could not
+    // be signed in to at start as kept, or one a switch needs the password
+    // for): on the Settings tab, saying why, unless a sign-in is open or a
+    // link's page is there, when a notice offers it instead.
+    val signInAsk by sessions.signInAsk.collectAsStateWithLifecycle()
+    LaunchedEffect(signInAsk) {
+        val ask = signInAsk ?: return@LaunchedEffect
+        sessions.signInAsked(ask)
+        routeSignInAsk(ask, sessions.servers.value, sessions.state.value, running, stacks.last(), feedback, askAgain = { sessions.ask(it) }, select = { selected = stacks.lastIndex }, push = { stacks.last().add(it) })
+    }
+    val back: () -> Unit = { stack.backOne() }
     val hasTrack = now.trackId != null
     // The bar's small player, and the full one over everything.
     var barPlayer by rememberSaveable { mutableStateOf(false) }
     var playerOpen by rememberSaveable { mutableStateOf(false) }
+    // A sign-in page opened while the full player is up (a family link, a
+    // server's sign-in asked for) closes the player, so the page is not left
+    // under it.
+    val top = stack.lastOrNull()
+    LaunchedEffect(top) { if (isSignInRoute(top)) playerOpen = false }
     // The full player hides everything under it, so the pages need not draw.
     var playerCovers by remember { mutableStateOf(false) }
     // A search asked for elsewhere (the live player's "Find this song in
@@ -231,8 +268,9 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
         onSelect = { index ->
             barPlayer = false
             if (index == selected) {
-                // Tapping the current tab goes back to its top.
-                while (stack.size > 1) stack.removeAt(stack.lastIndex)
+                // Tapping the current tab goes back to its top, or, while a
+                // sign-in is open, to the sign-in page nearest the top.
+                stack.reselect(running.open.value.isNotEmpty())
             } else {
                 selected = index
             }
@@ -302,7 +340,7 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
                     AmbientBackdrop(stack.lastOrNull(), now, pageArtworks, awake = !playerOpen)
                     NavDisplay(
                         entries = tabPages[selected],
-                        onBack = { stack.removeLastOrNull() },
+                        onBack = { stack.backOne() },
                         // Turned sideways, pages keep clear of the camera cutout and
                         // a side navigation bar; the glow still fills the screen.
                         modifier = Modifier.fillMaxSize().windowInsetsPadding(SideInsets),
@@ -313,14 +351,16 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
                 }
                 // The status bar's glass: what scrolls up under the clock is frosted. The full
                 // player, once it covers the pages, has its own top.
-                if (!playerCovers) StatusGlaze(haze, Modifier.align(Alignment.TopCenter))
+                if (!playerCovers) {
+                    StatusGlaze(haze, Modifier.align(Alignment.TopCenter))
+                }
                 // Back from the top of another tab goes Home rather than out.
                 BackHandler(enabled = selected != 0 && stack.size == 1) { selected = 0 }
 
                 // The bar steps aside while the full player is open; the artwork
                 // flies between the two.
                 AnimatedVisibility(
-                    visible = !playerOpen,
+                    visible = barShown(playerOpen, stack.lastOrNull()),
                     enter = fadeIn(tween(300)),
                     exit = fadeOut(tween(300)),
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -346,7 +386,7 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
                 // Songs on their way: a small pill above the bar, on the
                 // right, that opens the server downloads sheet when tapped.
                 AnimatedVisibility(
-                    visible = !playerOpen,
+                    visible = barShown(playerOpen, stack.lastOrNull()),
                     enter = fadeIn(tween(300)),
                     exit = fadeOut(tween(300)),
                     modifier = Modifier.align(Alignment.BottomEnd),
@@ -358,31 +398,40 @@ fun MainShell(library: DeviceLibrary, playback: PlaybackConnection, feedback: Fe
                     enter = fadeIn(tween(400)),
                     exit = fadeOut(tween(300)),
                 ) {
-                    PlayerOverlay(
-                        backdrop = playerHaze,
-                        onCovers = { playerCovers = it },
-                        artModifier = Modifier.sharedElement(rememberSharedContentState(ArtKey), this),
-                        onClose = { playerOpen = false },
-                        onOpenArtist = { id ->
-                            playerOpen = false
-                            stack.add(ArtistRoute(id))
-                        },
-                        onOpenAlbum = { id ->
-                            playerOpen = false
-                            stack.add(AlbumRoute(id))
-                        },
-                    )
+                    // The player sits over its cover, so it keeps Octo's dark look in every theme.
+                    OverArt {
+                        PlayerOverlay(
+                            backdrop = playerHaze,
+                            onCovers = { playerCovers = it },
+                            artModifier = Modifier.sharedElement(rememberSharedContentState(ArtKey), this),
+                            onClose = { playerOpen = false },
+                            onOpenArtist = { id ->
+                                playerOpen = false
+                                stack.add(ArtistRoute(id))
+                            },
+                            onOpenAlbum = { id ->
+                                playerOpen = false
+                                stack.add(AlbumRoute(id))
+                            },
+                        )
+                    }
                 }
-                // Over the player, the menus frost the player rather than the page.
-                SongMenuHost(songMenu, onOpen = openFromMenu, backdrop = if (playerOpen && hasTrack) playerHaze else haze)
-                PlaylistSheetsHost(playlistSheets)
-                DisconnectSheetHost(disconnectPrompt)
-                ChoiceSheetHost(choiceSheet)
-                ShareSheetHost(shareSheet)
-                FamilyRequestSheetHost()
-                app.winters.octo.ui.downloads.ServerDownloadsHost()
-                // Above the sheets, so an undo stays reachable while one is open.
-                FeedbackHost(feedback)
+                // While the player is open, what opens over it takes its dark
+                // look and frosts the player; each sheet and menu keeps the
+                // look it opened with.
+                OverlayLayer(playerOver = playerOpen && hasTrack, player = playerHaze, page = haze) {
+                    SongMenuHost(songMenu, onOpen = openFromMenu)
+                    PlaylistSheetsHost(playlistSheets)
+                    DisconnectSheetHost(disconnectPrompt)
+                    ChoiceSheetHost(choiceSheet)
+                    ShareSheetHost(shareSheet)
+                    FamilyRequestSheetHost()
+                    app.winters.octo.ui.downloads.ServerDownloadsHost()
+                    // A changed server certificate, asked about again over whatever is open.
+                    app.winters.octo.ui.signin.CertificateChangeHost()
+                    // Above the sheets, so an undo stays reachable while one is open.
+                    FeedbackHost(feedback)
+                }
             }
         }
     }
@@ -400,7 +449,7 @@ private const val ArtKey = "now-playing-art"
 // the tab it belongs to.
 private fun pagesFor(stack: NavBackStack<NavKey>): (NavKey) -> NavEntry<NavKey> {
     val open: (NavKey) -> Unit = { stack.add(it) }
-    val back: () -> Unit = { stack.removeLastOrNull() }
+    val back: () -> Unit = { stack.backOne() }
     return entryProvider {
         entry<HomeRoute> { HomeScreen(open) }
         entry<SearchRoute> { SearchScreen(open) }
@@ -424,21 +473,22 @@ private fun pagesFor(stack: NavBackStack<NavKey>): (NavKey) -> NavEntry<NavKey> 
         entry<FavouritesRoute> { FavouritesScreen(open, back, openingSegment(it)) }
         entry<DownloadsRoute> { DownloadsScreen(back) }
         entry<PlaylistRoute> { PlaylistScreen(it.id, back) }
+        entry<PlaylistFolderRoute> { PlaylistFolderScreen(it.id, open, back) }
         entry<LiveListRoute> { LiveListScreen(it.id, back) }
         // Once saved, a new live list's screen takes the editor's place.
         entry<LiveListEditRoute> { route ->
             LiveListEditScreen(route.id, route.start, back, onSaved = { saved ->
-                stack.removeLastOrNull()
+                stack.backOne()
                 if (route.id == null) open(LiveListRoute(saved))
             })
         }
-        entry<SignInRoute> { SignInScreen(back) }
-        entry<EditConnectionRoute> { SignInScreen(back, editing = true) }
-        entry<ServerFormRoute> { route -> SignInScreen(back, form = route.form, serverId = route.id, note = route.note) }
+        entry<SignInRoute> { route -> SignInScreen(back, onDone = { stack.removeOwn(route) }) }
+        entry<EditConnectionRoute> { route -> SignInScreen(back, onDone = { stack.removeOwn(route) }, editing = true) }
+        entry<ServerFormRoute> { route -> SignInScreen(back, onDone = { stack.removeOwn(route) }, form = route.form, serverId = route.id, note = route.note) }
         entry<OctoAdminRoute> { OctoAdminScreen(back) }
         entry<ImportRoute> { ImportScreen(back) }
         entry<FamilyRoute> { FamilyScreen(back, onImport = { open(ImportRoute) }) }
-        entry<FamilyJoinRoute> { route -> SignInScreen(back, join = parseFamilyLink(route.link)) }
+        entry<FamilyJoinRoute> { route -> SignInScreen(back, onDone = { stack.removeOwn(route) }, join = parseFamilyLink(route.link), joinOpened = route.opened) }
         entry<ChartsRoute> { app.winters.octo.ui.charts.ChartsScreen(back) }
         entry<SoundRoute> { SoundScreen(back) }
         entry<HomeSectionsRoute> { app.winters.octo.ui.settings.HomeSectionsPage(back) }
@@ -450,4 +500,75 @@ private fun pagesFor(stack: NavBackStack<NavKey>): (NavKey) -> NavEntry<NavKey> 
         entry<HealthCheckRoute> { HealthCheckScreen(it.check, back) }
         entry<HealthTrashRoute> { RecentlyRemovedScreen(back) }
     }
+}
+
+// Where a family link or a family notice opens. While a sign-in is open a
+// link is refused: the open form says why under its address, a notice offers
+// the link again ("Use it", which routes it again from the start), and
+// nothing moves. Otherwise the Settings tab, with Family, or with the link's
+// page on top (replacing a link's page already there). Before a link's page
+// goes on, every page of Octo's own sign-in asks leaves the tab, so none is
+// left under it, and the topmost one still to ask is offered again.
+internal fun routeFamilyOpen(
+    what: FamilyOpen,
+    running: SignInRunning,
+    feedback: Feedback,
+    reopen: (FamilyOpen) -> Unit,
+    select: () -> Unit,
+    nextOpening: () -> Long,
+    stack: MutableList<NavKey>,
+    askAgain: (SignInAsk) -> Unit,
+    nameOf: (String) -> String?,
+) {
+    if (what is FamilyOpen.Join && running.open.value.isNotEmpty()) {
+        running.noteLink(SignInWords.LINK_WHILE_SIGN_IN_OPEN)
+        feedback.show(SignInWords.LINK_WHILE_SIGN_IN_OPEN, "Use it", { reopen(what) })
+        return
+    }
+    select()
+    when (what) {
+        FamilyOpen.Family -> stack.add(FamilyRoute)
+        is FamilyOpen.Join -> {
+            val asked = stack.removeAsked()
+            stack.openJoin(FamilyJoinRoute(familyAppLink(what.link), opened = nextOpening()))
+            val offered = asked.asReversed().firstNotNullOfOrNull { ask -> nameOf(ask.serverId)?.let { ask to it } }
+            if (offered != null) {
+                val (ask, name) = offered
+                feedback.show(SignInWords.askWhileSignInOpen(name), "Sign in", { askAgain(ask) })
+            }
+        }
+    }
+}
+
+// Where a kept server's sign-in form that the sessions ask for goes, read
+// when it is routed: nowhere when the server is gone or is the one in use
+// and signed in; to a notice offering it ("Sign in", which asks again and
+// never switches) while a sign-in is open or a link's page is on the
+// Settings tab; otherwise onto the Settings tab, marked as asked.
+internal fun routeSignInAsk(
+    ask: SignInAsk,
+    kept: KeptServers,
+    state: SessionState,
+    running: SignInRunning,
+    stack: List<NavKey>,
+    feedback: Feedback,
+    askAgain: (SignInAsk) -> Unit,
+    select: () -> Unit,
+    push: (NavKey) -> Unit,
+) {
+    val name = askName(ask.serverId, kept, state) ?: return
+    if (running.open.value.isNotEmpty() || stack.any { it is FamilyJoinRoute }) {
+        feedback.show(SignInWords.askWhileSignInOpen(name), "Sign in", { askAgain(ask) })
+        return
+    }
+    select()
+    push(ServerFormRoute(ServerForm.SignIn, ask.serverId, note = ask.note, asked = true))
+}
+
+// The name of a kept server to ask to sign in to, or null when there is
+// none to ask: it is gone, or it is the one in use and signed in.
+internal fun askName(id: String, kept: KeptServers, state: SessionState): String? {
+    val server = kept.find(id) ?: return null
+    if ((state as? SessionState.SignedIn)?.session?.id == id) return null
+    return server.name
 }

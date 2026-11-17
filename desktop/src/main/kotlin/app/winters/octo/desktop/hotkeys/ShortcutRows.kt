@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -21,6 +22,7 @@ import app.winters.octo.design.Corner
 import app.winters.octo.design.DesktopType
 import app.winters.octo.design.GlazeSelected
 import app.winters.octo.design.OctoColors
+import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.RowHeight
 import app.winters.octo.design.Space
 import app.winters.octo.design.Txt
@@ -28,13 +30,18 @@ import app.winters.octo.design.hoverLift
 import app.winters.octo.desktop.AppState
 import app.winters.octo.desktop.pages.RowInset
 import app.winters.octo.desktop.pages.ActionRow
-import app.winters.octo.desktop.pages.Group
+import app.winters.octo.desktop.pages.HiddenRow
+import app.winters.octo.desktop.pages.LocalRowsOff
+import app.winters.octo.desktop.pages.SettingsCard
 import app.winters.octo.desktop.pages.SwitchRow
+import app.winters.octo.desktop.pages.settingsRow
+import app.winters.octo.desktop.pages.settingsSlug
+import app.winters.octo.desktop.pages.switchedOff
 import app.winters.octo.desktop.system.LocalSystem
 
-// Settings > Keyboard, below Octo's own keys: the global shortcuts, a
-// switch for all of them and a row per action with its keys. A click on a
-// row takes the next keys pressed as its new ones.
+// Settings > Keyboard, first: the global shortcuts, a switch for all of
+// them and a row per action with its keys. A click on a row takes the next
+// keys pressed as its new ones.
 @Composable
 fun GlobalShortcutGroup(app: AppState) {
     val shortcuts = LocalSystem.current?.shortcuts ?: return
@@ -44,7 +51,7 @@ fun GlobalShortcutGroup(app: AppState) {
     val keys = hotkeysOf(prefs)
     // Leaving the page stops listening for keys.
     DisposableEffect(shortcuts) { onDispose { shortcuts.stopRecording() } }
-    Group("Global shortcuts") {
+    SettingsCard("Global shortcuts", OctoIcons.Globe) {
         SwitchRow(
             "Use these keys from any app",
             "Play, skip and set the volume from any app, even with Octo hidden.",
@@ -54,15 +61,20 @@ fun GlobalShortcutGroup(app: AppState) {
             ShortcutRow(action, keys[action], shortcuts, on = prefs.on)
         }
         if (prefs.keys.isNotEmpty()) {
-            ActionRow("Use the usual keys", null, "Reset", shortcuts::useUsualKeys)
+            CompositionLocalProvider(LocalRowsOff provides !prefs.on) {
+                Box(Modifier.switchedOff(!prefs.on)) { ActionRow("Use the usual keys", null, "Reset", shortcuts::useUsualKeys) }
+            }
+        } else {
+            HiddenRow("use-the-usual-keys", by = "use-these-keys-from-any-app")
         }
     }
 }
 
-// One action and its keys, as dense as the list of Octo's own keys above
+// One action and its keys, as dense as the list of Octo's own keys under
 // it. While it listens, the keys' place says so on the darker pill and the
 // line under the name says how to finish; keys that can't be used, or that
-// another app has, say why in orange.
+// another app has, say why in orange. With the keys off it stays in place,
+// dimmed and out of reach, as a card's rows do with its switch off.
 @Composable
 private fun ShortcutRow(action: HotkeyAction, combo: KeyCombo?, shortcuts: GlobalShortcuts, on: Boolean) {
     val listening = shortcuts.recording == action
@@ -76,17 +88,26 @@ private fun ShortcutRow(action: HotkeyAction, combo: KeyCombo?, shortcuts: Globa
     }
     Row(
         Modifier
+            .settingsRow(action.label, stable = "[each global shortcut]", id = "key-${settingsSlug(action.name)}")
             .fillMaxWidth()
             .heightIn(min = RowHeight.Regular)
-            .hoverLift(Corner.RowShape)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Button) {
-                if (listening) shortcuts.stopRecording() else shortcuts.record(action)
-            }
+            .switchedOff(!on)
+            .then(
+                if (on) {
+                    Modifier
+                        .hoverLift(Corner.RowShape)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Button) {
+                            if (listening) shortcuts.stopRecording() else shortcuts.record(action)
+                        }
+                } else {
+                    Modifier
+                },
+            )
             .padding(horizontal = RowInset, vertical = Space.S),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f).padding(end = Space.Xl)) {
-            Txt(action.label, DesktopType.body, if (on || listening) OctoColors.TextPrimary else OctoColors.TextMuted, maxLines = 2)
+            Txt(action.label, DesktopType.body, OctoColors.TextPrimary, maxLines = 2)
             if (caption != null) {
                 val warn = problem != null || refused
                 Txt(caption, DesktopType.meta, if (warn) OctoColors.SignalOrange else OctoColors.TextMuted, Modifier.padding(top = Space.Xxs), maxLines = 3)
@@ -102,7 +123,7 @@ private fun ShortcutRow(action: HotkeyAction, combo: KeyCombo?, shortcuts: Globa
             }
             val colour = when {
                 listening -> OctoColors.TextPrimary
-                combo == null || !on -> OctoColors.TextMuted
+                combo == null -> OctoColors.TextMuted
                 else -> OctoColors.TextSecondary
             }
             Txt(words, DesktopType.meta.copy(fontFeatureSettings = "tnum"), colour, Modifier.padding(horizontal = Space.M, vertical = Space.Xs))

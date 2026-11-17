@@ -2,15 +2,46 @@
 //! checked-in ones (see `tests/fixtures/README.md`).
 
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime};
 
-/// A fresh folder for one test's files.
+/// How long a test's folder is kept. Tests run in seconds, so a folder this
+/// old belongs to no test still running.
+const KEPT_FOR: Duration = Duration::from_secs(60 * 60);
+
+/// A fresh folder for one test's files. The first call in a process clears
+/// away the folders earlier runs left, once they are `KEPT_FOR` old.
 pub fn temp_dir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+    static PRUNED: Once = Once::new();
+    let root = std::env::temp_dir().join("octo-audio-tests");
+    PRUNED.call_once(|| {
+        if let Some(cutoff) = SystemTime::now().checked_sub(KEPT_FOR) {
+            prune(&root, cutoff);
+        }
+    });
     let n = NEXT.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join("octo-audio-tests").join(format!("{}-{n}", std::process::id()));
+    let dir = root.join(format!("{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Removes the folders in `root` last changed before `cutoff`, with all
+/// they hold, and returns how many went. A folder that cannot be read or
+/// removed (one a test elsewhere still has open) is left, and a missing
+/// `root` is nothing to do.
+pub fn prune(root: &Path, cutoff: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let old = meta.is_dir() && meta.modified().is_ok_and(|changed| changed < cutoff);
+        if old && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// A checked-in fixture.
@@ -117,6 +148,49 @@ pub fn frequency(stereo: &[f32], rate: u32) -> f64 {
     (crossings.len() - 1) as f64 * rate as f64 / span
 }
 
+/// The true peak of interleaved stereo from frame `from` to `to`, as a level
+/// (1 is full scale): the samples, and the sound read at 7 points between
+/// each two, each through a windowed sinc (Blackman) 48 samples either side.
+/// Finer and longer than the limiter's own reading, so it can check it.
+pub fn true_peak(stereo: &[f32], from: usize, to: usize) -> f64 {
+    use std::f64::consts::PI;
+    const STEPS: usize = 8;
+    const HALF: isize = 48;
+    let frames = stereo.len() / 2;
+    let taps: Vec<Vec<f64>> = (1..STEPS)
+        .map(|p| {
+            let along = p as f64 / STEPS as f64;
+            let raw: Vec<f64> = (-HALF + 1..=HALF)
+                .map(|n| {
+                    let d = along - n as f64;
+                    let span = HALF as f64;
+                    let window = 0.42 + 0.5 * (PI * d / span).cos() + 0.08 * (2.0 * PI * d / span).cos();
+                    (PI * d).sin() / (PI * d) * window
+                })
+                .collect();
+            let sum: f64 = raw.iter().sum();
+            raw.into_iter().map(|h| h / sum).collect()
+        })
+        .collect();
+    let mut peak = 0f64;
+    for ch in 0..2 {
+        for i in from..to.min(frames) {
+            peak = peak.max((stereo[i * 2 + ch] as f64).abs());
+            for phase in &taps {
+                let mut y = 0.0;
+                for (j, h) in phase.iter().enumerate() {
+                    let at = i as isize + j as isize - HALF + 1;
+                    if at >= 0 && (at as usize) < frames {
+                        y += stereo[at as usize * 2 + ch] as f64 * h;
+                    }
+                }
+                peak = peak.max(y.abs());
+            }
+        }
+    }
+    peak
+}
+
 /// `audio` with an ID3v2.3 tag in front holding `text` frames (like
 /// "TBPM") and `user` TXXX frames (description, value), as taggers write
 /// them into MP3 files.
@@ -149,4 +223,26 @@ pub fn with_id3v2(audio: &[u8], text: &[(&str, &str)], user: &[(&str, &str)]) ->
     out.extend_from_slice(&frames);
     out.extend_from_slice(audio);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_test_folder_is_pruned_only_once_older_than_the_cutoff() {
+        // A root of its own, so no other test's folder is touched.
+        let root = temp_dir().join("pruned");
+        let folder = root.join("left");
+        std::fs::create_dir_all(folder.join("inner")).unwrap();
+        std::fs::write(folder.join("inner").join("a.wav"), b"RIFF").unwrap();
+        // Changed just now, after a cutoff an hour back: kept.
+        assert_eq!(prune(&root, SystemTime::now() - Duration::from_secs(60 * 60)), 0);
+        assert!(folder.exists());
+        // Before a cutoff in the future: removed, with all it holds.
+        assert_eq!(prune(&root, SystemTime::now() + Duration::from_secs(60)), 1);
+        assert!(!folder.exists());
+        // A root that is not there is no error.
+        assert_eq!(prune(&root.join("missing"), SystemTime::now()), 0);
+    }
 }

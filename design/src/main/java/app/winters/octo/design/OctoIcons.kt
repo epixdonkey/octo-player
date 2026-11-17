@@ -69,6 +69,10 @@ object OctoIcons {
     // A folder, for browsing music the way it is filed.
     val Folder = R.drawable.sym_folder
 
+    // A playlist folder: a folder holding a note, apart from the folders
+    // music is filed in. Drawn for Octo in the Phosphor Regular style.
+    val PlaylistFolder = R.drawable.sym_playlist_folder
+
     // How a list is ordered, and which way it runs.
     val Sort = R.drawable.sym_sort
     // Rules: filters, and the mark of a live list.
@@ -78,6 +82,10 @@ object OctoIcons {
 
     // Everything known about a song.
     val Info = R.drawable.sym_info
+
+    // Something that went wrong, beside the words that say what: filled, a
+    // shape of its own beside the info circle, whatever the accent.
+    val Error = R.drawable.sym_error_fill
 
     // Picking songs in a list, and a picked one.
     val Select = R.drawable.sym_check_circle
@@ -130,6 +138,9 @@ object OctoIcons {
     val Speaker = R.drawable.sym_speaker
     val SpeakerGroup = R.drawable.sym_speaker_group
     val Headphones = R.drawable.sym_headphones
+
+    // Another version of a song found online, as desktop and iPhone draw it.
+    val LeftRight = R.drawable.sym_arrows_left_right
 
     // Signing in: the address, whether it is encrypted, and an API key.
     val Globe = R.drawable.sym_globe

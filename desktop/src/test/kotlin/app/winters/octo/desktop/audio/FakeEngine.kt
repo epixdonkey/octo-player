@@ -1,6 +1,7 @@
 package app.winters.octo.desktop.audio
 
 import app.winters.octo.audio.AutomixSettings
+import app.winters.octo.audio.ClientCertificate
 import app.winters.octo.audio.DspSettings
 import app.winters.octo.audio.EngineEvent
 import app.winters.octo.audio.EqSettings
@@ -34,6 +35,7 @@ class FakeEngine : AudioEngine {
     var current: EngineDevice? = null
     var format: EngineFormat? = null
     var pins: Map<String, String>? = null
+    var certificate: ClientCertificate? = null
 
     // The profiles handed over, by queue item id.
     val profiles = java.util.concurrent.ConcurrentHashMap<String, SongProfile>()
@@ -144,6 +146,11 @@ class FakeEngine : AudioEngine {
     override fun setTrustedCertificates(pins: Map<String, String>) {
         this.pins = pins
         calls += "trust ${pins.size}"
+    }
+
+    override fun setClientCertificate(certificate: ClientCertificate?) {
+        this.certificate = certificate
+        calls += if (certificate == null) "certificate none" else "certificate ${certificate.chain.size}"
     }
 
     override fun close() {}

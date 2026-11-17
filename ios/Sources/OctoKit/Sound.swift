@@ -352,8 +352,12 @@ public final class FilterBank: @unchecked Sendable {
     /// curve does not restart them from silence.
     public func continueFrom(_ other: FilterBank) {
         guard other.b0.count == b0.count, other.channels == channels else { return }
-        z1 = other.z1
-        z2 = other.z2
+        // Copied value by value: memory shared with the other bank would be copied at the first
+        // filtered sample, on the audio thread.
+        for i in z1.indices {
+            z1[i] = other.z1[i]
+            z2[i] = other.z2[i]
+        }
     }
 
     /// Forgets the filters' memory.
@@ -526,6 +530,12 @@ public final class AlbumRun: @unchecked Sendable {
     }
 }
 
+/// With the true peak read, the sound between two samples is read at this many points a sample (a
+/// quarter, a half and three quarters of the way along, besides the samples themselves), each
+/// from this many samples on either side. The same numbers as the shared Kotlin `Limiter`.
+public let truePeakSteps = 4
+public let truePeakHalfTaps = 16
+
 /// Keeps peaks under a ceiling just below full scale. The sound runs a moment late, so the
 /// limiter sees a peak coming and turns the level down in time instead of clipping it, then
 /// lets the level back up slowly so the change is not heard. All channels move together, so
@@ -533,12 +543,40 @@ public final class AlbumRun: @unchecked Sendable {
 ///
 /// The delay holds back the first moment of each stream and hands it out at the end, so nothing
 /// is lost or added between songs.
+///
+/// Coming back up, the level lands exactly on unity once the remaining step is lost in float
+/// rounding, so sound that needs no limiting after a peak passes through bit for bit.
+///
+/// With `rampedAttack` the level goes down in a straight line across the lookahead, reaching each
+/// frame's need just as that frame comes out, instead of dropping at once when the peak comes into
+/// view. The sum of two songs is limited this way, so the limiter never steps the level.
+///
+/// With `truePeak` the sound between samples is held under the ceiling too: as each frame comes
+/// in, the points between the two samples `truePeakHalfTaps` frames back are read, and what they
+/// need holds the level down over every sample the reading used. The sum of two songs is limited
+/// this way, so the sound between its samples stays under the ceiling, not only the samples.
+/// Without it, only samples count, exactly as before. It needs a lookahead of at least
+/// 2 * `truePeakHalfTaps` frames (0.7 ms at 48 kHz) and is left out with a shorter one.
 public final class Limiter: @unchecked Sendable {
     public let channels: Int
     /// Frames of delay.
     public let latency: Int
+    public let rampedAttack: Bool
+    public let truePeak: Bool
     /// Off, the level returns to unity and the sound only passes through the delay.
     public var enabled = true
+    private let readsBetween: Bool
+    /// For each point read between two samples (a quarter, a half and three quarters along), a
+    /// windowed sinc (Blackman) over the `truePeakTaps` samples around it, oldest first, one after
+    /// another; scaled so a steady level reads as itself.
+    private let betweenTaps: [Float]
+    /// The last `truePeakTaps` frames in, each channel's kept twice over so its newest frames run
+    /// on from `recentAt` without wrapping.
+    private var recent: [Float]
+    private var recentAt = 0
+    /// With the ramped attack and the true peak: what the sound between samples read as each frame
+    /// came in needs, by that frame's number.
+    private var betweenOf: [Float]
     private let ceiling: Float
     private let release: Float
     /// The delayed frames, oldest first from `head`, one frame after another.
@@ -551,6 +589,9 @@ public final class Limiter: @unchecked Sendable {
     private var needAt: [Int]
     private var needFront = 0
     private var needSize = 0
+    /// With the ramped attack: every frame's need, by frame number, for the frames in view (a
+    /// nearer need that is not the lowest can still set the slope).
+    private var needOf: [Float]
     /// Frames in and out, to know which needs are still in view.
     private var inCount = 0
     private var outCount = 0
@@ -559,18 +600,46 @@ public final class Limiter: @unchecked Sendable {
     /// One incoming frame, read before anything is written over it.
     private var incoming: [Float]
 
-    public init(channels: Int, sampleRate: Double, ceilingDb: Double = -1, lookaheadMs: Double = 1.5, releaseMs: Double = 100) {
+    public init(channels: Int, sampleRate: Double, ceilingDb: Double = -1, lookaheadMs: Double = 1.5, releaseMs: Double = 100,
+                rampedAttack: Bool = false, truePeak: Bool = false) {
         self.channels = channels
+        self.rampedAttack = rampedAttack
+        self.truePeak = truePeak
         latency = max(1, Int((sampleRate * lookaheadMs / 1_000).rounded()))
+        readsBetween = truePeak && latency >= Self.truePeakTaps
         ceiling = Float(pow(10, ceilingDb / 20))
         release = Float(1 - exp(-1 / (sampleRate * releaseMs / 1_000)))
         held = Array(repeating: 0, count: latency * channels)
         need = Array(repeating: 1, count: latency + 2)
         needAt = Array(repeating: 0, count: latency + 2)
+        needOf = Array(repeating: 1, count: rampedAttack ? latency + 1 : 0)
         incoming = Array(repeating: 0, count: channels)
+        recent = Array(repeating: 0, count: readsBetween ? channels * Self.truePeakTaps * 2 : 0)
+        betweenOf = Array(repeating: 1, count: rampedAttack && readsBetween ? latency + 1 : 0)
+        var taps: [Float] = []
+        if readsBetween {
+            let half = Double(truePeakHalfTaps)
+            for step in 0..<(truePeakSteps - 1) {
+                let along = Double(step + 1) / Double(truePeakSteps)
+                let raw = (0..<Self.truePeakTaps).map { j -> Double in
+                    // How far the point read lies from sample j.
+                    let d = along + half - 1 - Double(j)
+                    let window = 0.42 + 0.5 * cos(Double.pi * d / half) + 0.08 * cos(2 * Double.pi * d / half)
+                    return sin(Double.pi * d) / (Double.pi * d) * window
+                }
+                let sum = raw.reduce(0, +)
+                taps += raw.map { Float($0 / sum) }
+            }
+        }
+        betweenTaps = taps
     }
 
+    private static let truePeakTaps = truePeakHalfTaps * 2
+
     public var ceilingLevel: Float { ceiling }
+
+    /// The level applied to the last frame out, for checks and snapshots.
+    public var level: Float { gain }
 
     /// Takes `frames` frames from `input` and writes the frames that come out of the delay to
     /// `output`, which may be the same buffers. Returns how many frames came out: fewer than
@@ -585,7 +654,24 @@ public final class Limiter: @unchecked Sendable {
                 incoming[ch] = sample
                 peak = max(peak, abs(sample))
             }
-            pushNeed(enabled && peak > ceiling ? ceiling / peak : 1)
+            let wanted: Float = enabled && peak > ceiling ? ceiling / peak : 1
+            var between: Float = 1
+            if readsBetween {
+                // Kept while off too, so the reading can start at any frame.
+                remember()
+                if enabled {
+                    let read = peakBetween()
+                    if read > ceiling { between = ceiling / read }
+                }
+            }
+            // A need counts from the frame that brought it in, so the reading's holds the level
+            // down from `latency` frames before this one: over every sample it used.
+            pushNeed(between < wanted ? between : wanted)
+            if rampedAttack {
+                let slot = inCount % needOf.count
+                needOf[slot] = wanted
+                if readsBetween { betweenOf[slot] = between }
+            }
             inCount += 1
             if heldFrames < latency {
                 let slot = ((head + heldFrames) % latency) * channels
@@ -633,14 +719,55 @@ public final class Limiter: @unchecked Sendable {
         needSize = 0
         inCount = 0
         outCount = 0
+        for i in needOf.indices { needOf[i] = 1 }
+        for i in betweenOf.indices { betweenOf[i] = 1 }
+        for i in recent.indices { recent[i] = 0 }
+        recentAt = 0
+    }
+
+    /// Forgets the sound in the delay and puts the level back at unity, for a stream that starts
+    /// over from a fresh place.
+    public func reset() {
+        clear()
+        gain = 1
+    }
+
+    /// Takes over everything `other` holds (delayed frames, needs in view and level), so a stretch
+    /// can be run again from the same state. Both must be built alike. Copies element by element,
+    /// so neither limiter's storage is shared or allocated.
+    public func copyFrom(_ other: Limiter) {
+        precondition(other.channels == channels && other.latency == latency && other.rampedAttack == rampedAttack
+                     && other.truePeak == truePeak, "limiters built differently")
+        for i in held.indices { held[i] = other.held[i] }
+        head = other.head
+        heldFrames = other.heldFrames
+        for i in need.indices { need[i] = other.need[i] }
+        for i in needAt.indices { needAt[i] = other.needAt[i] }
+        needFront = other.needFront
+        needSize = other.needSize
+        for i in needOf.indices { needOf[i] = other.needOf[i] }
+        for i in betweenOf.indices { betweenOf[i] = other.betweenOf[i] }
+        for i in recent.indices { recent[i] = other.recent[i] }
+        recentAt = other.recentAt
+        inCount = other.inCount
+        outCount = other.outCount
+        gain = other.gain
+        enabled = other.enabled
     }
 
     /// Writes the oldest held frame, turned down as far as any frame in view needs. Down is
-    /// instant; back up is slow.
+    /// instant (or a straight line across the lookahead with the ramped attack); back up is slow.
     private func emit(_ output: [UnsafeMutablePointer<Float>], at index: Int) {
         while needSize > 0 && needAt[needFront] < outCount { popFront() }
-        let target = needSize > 0 ? need[needFront] : 1
-        gain = target < gain ? target : gain + (target - gain) * release
+        let target = rampedAttack ? rampTarget() : (needSize > 0 ? need[needFront] : 1)
+        if target < gain {
+            gain = target
+        } else {
+            let next = gain + (target - gain) * release
+            // The step lost in rounding would leave the level just short of its target for good
+            // (0.99986 for unity at 48 kHz).
+            gain = next == gain ? target : next
+        }
         let from = head * channels
         for ch in 0..<channels {
             var y = held[from + ch] * gain
@@ -648,6 +775,60 @@ public final class Limiter: @unchecked Sendable {
             output[ch][index] = y
         }
         outCount += 1
+    }
+
+    /// The lowest of the straight lines from unity, as each frame in view comes into view, down to
+    /// its need as it comes out. A need read between samples comes into view as late as the frame
+    /// that completed the reading, so its line reaches it as the first sample the reading used
+    /// comes out, and holds it from there.
+    private func rampTarget() -> Float {
+        var target: Float = 1
+        var frame = outCount
+        let span = Float(latency - (Self.truePeakTaps - 1))
+        while frame < inCount {
+            let slot = frame % needOf.count
+            let wanted = needOf[slot]
+            if wanted < 1 {
+                let ahead = Float(frame - outCount)
+                target = min(target, wanted + (1 - wanted) * ahead / Float(latency))
+            }
+            if readsBetween {
+                let between = betweenOf[slot]
+                if between < 1 {
+                    let ahead = Float(max(0, frame - (Self.truePeakTaps - 1) - outCount))
+                    target = min(target, between + (1 - between) * ahead / span)
+                }
+            }
+            frame += 1
+        }
+        return target
+    }
+
+    private func remember() {
+        let taps = Self.truePeakTaps
+        for ch in 0..<channels {
+            let slot = ch * taps * 2 + recentAt
+            recent[slot] = incoming[ch]
+            recent[slot + taps] = incoming[ch]
+        }
+        recentAt = (recentAt + 1) % taps
+    }
+
+    /// The loudest point read between the two samples in the middle of the frames remembered, on
+    /// any channel.
+    private func peakBetween() -> Float {
+        let taps = Self.truePeakTaps
+        var peak: Float = 0
+        for ch in 0..<channels {
+            let from = ch * taps * 2 + recentAt
+            for step in 0..<(truePeakSteps - 1) {
+                let at = step * taps
+                var y: Float = 0
+                for j in 0..<taps { y += recent[from + j] * betweenTaps[at + j] }
+                peak = max(peak, abs(y))
+            }
+        }
+        return peak
     }
 
     /// Anything asking for more level than this one can never be the lowest while this one is

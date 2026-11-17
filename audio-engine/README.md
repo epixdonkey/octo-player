@@ -187,7 +187,14 @@ engine.position().positionMs          // audio clock, fractional ms
 
 Server streams arrive as signed addresses from the app, as on Android, with
 optional extra headers per item. The engine reuses the address for range
-requests and reconnects.
+requests and reconnects, and follows redirects itself, at most 10 in a row:
+every hop asks for the range, but the item's headers go only to the origin
+of its own address (or, for an http address, to the same host over https at
+port 443), and each new request starts at that address again. An item's
+secure headers go to those same hops, but only over https. A song answered
+with a web page (`text/html`, a gateway's sign-in page), or refused (401,
+403) the way only a gateway refuses, fails at once with `SignInPage`; live
+radio plays whatever its station sends.
 
 ## Live streams
 

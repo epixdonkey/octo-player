@@ -6,7 +6,7 @@ import app.winters.octo.radio.SONG_RADIO
 
 import app.winters.octo.covers.PLAYLIST_COVERS_SETTING
 import app.winters.octo.animated.AnimatedArtSetting
-import app.winters.octo.catalog.searchKey
+import app.winters.octo.ui.search.rankSettings
 import kotlinx.serialization.Serializable
 
 // The pages Settings opens, in the order the front page lists them.
@@ -58,22 +58,19 @@ object SettingsIndex {
         section: String? = null,
     ): SettingEntry = SettingEntry(id, page, title, summary, keywords, section).also { registered += it }
 
-    // Playback
-    val Crossfade = add(
-        "crossfade", SettingsPage.Playback, "Crossfade", "Each song fades into the next",
-        listOf("fade", "blend", "gapless", "transition", "mix"),
+    // Playback. Between songs keeps the id the Crossfade switch had, and the
+    // rows under it keep theirs.
+    val BetweenSongs = add(
+        "crossfade", SettingsPage.Playback, "Between songs", "Gapless, Crossfade or Automix",
+        listOf("crossfade", "gapless", "automix", "blend", "mix", "transition", "dj", "smart transitions", "between songs", "fade"),
     )
     val CrossfadeLength = add(
-        "crossfade_length", SettingsPage.Playback, "Longest blend", "The most seconds two songs blend for",
-        listOf("fade", "seconds", "duration", "crossfade length"),
+        "crossfade_length", SettingsPage.Playback, "Length", "How many seconds a crossfade lasts",
+        listOf("fade", "seconds", "duration", "crossfade length", "longest blend"),
     )
     val CrossfadeCurve = add(
         "crossfade_curve", SettingsPage.Playback, "Crossfade curve", "How one song fades into the next",
         listOf("fade", "curve", "shape", "linear", "equal power", "s-curve", "logarithmic", "mix", "dj", "transition"),
-    )
-    val SmartTransitions = add(
-        "smart_transitions", SettingsPage.Playback, "Smart transitions", "Each blend starts where the songs meet best",
-        listOf("automix", "dj", "mix", "transition", "beat", "outro"),
     )
     val FilterSweeps = add(
         "filter_sweeps", SettingsPage.Playback, "Filter sweeps", "Songs thin out as they cross",
@@ -246,9 +243,17 @@ object SettingsIndex {
         "playlist_covers", SettingsPage.Appearance, PLAYLIST_COVERS_SETTING, "Designed covers, or the covers of their albums",
         listOf("playlist", "cover", "artwork", "mosaic", "picture", "designed"), section = "Playlists",
     )
+    val Theme = add(
+        "theme", SettingsPage.Appearance, "Theme", "The colors every screen is drawn in",
+        listOf("theme", "light mode", "dark mode", "night", "day", "colors", "palette", "appearance"), section = "Theme",
+    )
+    val MatchSystem = add(
+        "theme_match", SettingsPage.Appearance, "Match the system", "A light theme by day and a dark one by night, as the phone is set",
+        listOf("match", "system", "automatic", "day", "night"), section = "Theme",
+    )
     val AccentColor = add(
         "accent_color", SettingsPage.Appearance, "Accent color", "The color of selections, sliders, switches and buttons",
-        listOf("accent", "color", "colour", "theme", "tint", "highlight", "palette", "album art", "cover", "personalize"), section = "Accent color",
+        listOf("accent", "color", "colour", "tint", "highlight", "album art", "cover", "personalize"), section = "Accent color",
     )
     val GlassTint = add(
         "accent_glass", SettingsPage.Appearance, "Color the glass", "The bar, glass buttons and sheets take the accent too",
@@ -329,7 +334,7 @@ object SettingsIndex {
         listOf("speed", "ping", "latency", "slow"), section = "Server",
     )
     val ServerScan = add(
-        "server_scan", SettingsPage.Server, "Its folders", "When the server last looked for new music",
+        "server_scan", SettingsPage.Server, "Folders", "When the server last looked for new music",
         listOf("scan", "last scan", "new music"), section = "Server",
     )
     val OctoAdmin = add(
@@ -434,6 +439,10 @@ object SettingsIndex {
     val DownloadQuality = add(
         "download_quality", SettingsPage.Streaming, "Download quality", "The file downloads come as",
         listOf("bitrate", "kbps", "offline"), section = "Downloads",
+    )
+    val DownloadFormat = add(
+        "download_format", SettingsPage.Streaming, "Download format", "What smaller downloads are saved as",
+        listOf("opus", "aac", "mp3", "format", "codec", "offline"), section = "Downloads",
     )
     val WifiOnly = add(
         "wifi_only", SettingsPage.Streaming, "Download on Wi-Fi only", "Downloads wait for Wi-Fi",
@@ -569,40 +578,14 @@ object SettingsIndex {
     fun byId(id: String): SettingEntry? = registered.firstOrNull { it.id == id }
 }
 
-// How well a setting matches, best first: the title begins with what was
-// typed, every word is in the title, the title and other words together
-// cover it, or only the line about it does.
-private enum class Match { TitleStart, Title, Keywords, Summary }
-
-// Lowercase, accents and punctuation gone, so "wifi" finds "Wi-Fi".
-internal fun normalized(text: String): String =
-    searchKey(text).filter { it.isLetterOrDigit() || it.isWhitespace() }.replace(Regex("\\s+"), " ").trim()
-
-// A typed word is found in some text when a word there starts with it, or
-// anywhere inside it once it is three letters or more.
-private fun found(word: String, text: String): Boolean {
-    if (text.isEmpty()) return false
-    if (text.startsWith(word) || text.contains(" $word")) return true
-    return word.length >= 3 && text.contains(word)
-}
-
-// The settings that match what was typed, best first. Every typed word must
-// be found somewhere. Ties keep the order the settings are written in.
-fun searchSettings(query: String, entries: List<SettingEntry> = SettingsIndex.all): List<SettingEntry> {
-    val typed = normalized(query)
-    if (typed.isEmpty()) return emptyList()
-    val words = typed.split(' ')
-    return entries.mapNotNull { entry ->
-        val title = normalized(entry.title)
-        val other = normalized((entry.keywords + entry.page.title + listOfNotNull(entry.section)).joinToString(" "))
-        val summary = normalized(entry.summary)
-        val match = when {
-            title.startsWith(typed) -> Match.TitleStart
-            words.all { found(it, title) } -> Match.Title
-            words.all { found(it, title) || found(it, other) } -> Match.Keywords
-            words.all { found(it, title) || found(it, other) || found(it, summary) } -> Match.Summary
-            else -> return@mapNotNull null
-        }
-        entry to match
-    }.sortedBy { it.second }.map { it.first }
-}
+// The settings that match what was typed, best first: a title that begins
+// with it, then titles holding every word, then titles with other words,
+// then the line about it. Every typed word must be found somewhere. Ties
+// keep the order the settings are written in.
+fun searchSettings(query: String, entries: List<SettingEntry> = SettingsIndex.all): List<SettingEntry> = rankSettings(
+    query,
+    entries,
+    title = { it.title },
+    other = { (it.keywords + it.page.title + listOfNotNull(it.section)).joinToString(" ") },
+    summary = { it.summary },
+)

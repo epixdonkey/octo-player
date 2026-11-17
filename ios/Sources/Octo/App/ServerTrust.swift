@@ -3,18 +3,24 @@ import Foundation
 import OctoKit
 import Security
 
-/// Decides whom the app trusts. The system's own trust comes first; after that, a certificate
-/// the person accepted for that host, kept by its SHA-256 fingerprint. A pinned certificate also
+/// Decides whom the app trusts. The system's own trust comes first (a private authority's root
+/// the person installed and turned on in Certificate Trust Settings counts); after that, a
+/// certificate the person accepted for that host, kept by its key's pin (`CertificatePins`), so a
+/// renewal with the same key still counts. When a host of the server in use shows another
+/// certificate than the one accepted there, the question is asked again (`onCertificateChange`)
+/// rather than every call failing. A pinned certificate also
 /// stands in for the host name, since a self-made certificate rarely names the address a phone
 /// uses. When the server in use asks the phone to prove itself, its client certificate answers,
 /// and only at the server's own hosts. Its headers never follow a redirect to another address,
 /// and a call to it that could not connect is reported, so the address in use can be looked at
 /// again.
 final class ServerTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    /// A certificate the system does not trust, waiting for the person's answer.
+    /// A certificate the system does not trust, waiting for the person's answer: the fingerprint
+    /// they compare, and the pin kept when they trust it.
     struct Untrusted: Error, Equatable {
         let host: String
         let fingerprint: String
+        let pin: String
     }
 
     /// A client certificate as the system uses it: the identity and the chain sent with it.
@@ -32,6 +38,10 @@ final class ServerTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private var scope = ServerScope()
     private var client: ClientIdentity?
     private var connectionFailed: (@Sendable () -> Void)?
+    private var certificateChanged: (@Sendable (Untrusted) -> Void)?
+    /// Pins of changed certificates the person said no to, not asked about again until the app
+    /// starts again or the server in use changes.
+    private var declined: Set<String> = []
 
     private static let pinsKey = "trust.pins"
 
@@ -44,29 +54,51 @@ final class ServerTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         let configuration = URLSessionConfiguration.default.namingOcto(Session.appVersion)
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 30
+        // Cookies are kept by each client's own store (`ServerCookies`), never by the system.
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
 
     /// A session of its own for a kept server that is not the one in use, so the one in use keeps
-    /// its own: this server's addresses and client certificate, the same trusted certificates, and
-    /// at most `seconds` for each call as a whole. Throws when the certificate cannot be opened.
-    /// The caller ends it with `finishTasksAndInvalidate()` once done.
-    func ownSession(for addresses: [URL], certificate: (data: Data, password: String)?,
+    /// its own: this server's main and home addresses and client certificate, the same trusted
+    /// certificates, and at most `seconds` for each call as a whole. Throws when the certificate
+    /// cannot be opened. The caller ends it with `finishTasksAndInvalidate()` once done.
+    func ownSession(main: URL, home: URL?, certificate: (data: Data, password: String)?,
                     seconds: TimeInterval? = nil) throws -> URLSession {
         let identity = try certificate.map { try Self.identity($0.data, password: $0.password) }
         let configuration = URLSessionConfiguration.ephemeral.namingOcto(Session.appVersion)
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = seconds ?? 30
         if let seconds { configuration.timeoutIntervalForResource = seconds }
-        let delegate = OwnServerTrust(trust: self, scope: ServerScope(addresses), client: identity)
+        // Cookies are kept by each client's own store (`ServerCookies`), never by the system.
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        let delegate = OwnServerTrust(trust: self, scope: ServerScope(main: main, home: home), client: identity)
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
     func trust(_ question: Untrusted) {
         lock.withLock {
-            pins[question.host.lowercased()] = question.fingerprint
+            pins[question.host.lowercased()] = question.pin
             rejected[question.host.lowercased()] = nil
             UserDefaults.standard.set(pins, forKey: Self.pinsKey)
+        }
+    }
+
+    /// Runs `report` when a host of the server in use shows another certificate than the one the
+    /// person trusted there, unless they said no to that one already.
+    func onCertificateChange(_ report: @escaping @Sendable (Untrusted) -> Void) {
+        lock.withLock { certificateChanged = report }
+    }
+
+    /// The answer to a changed certificate: trusted, it is kept; said no to, it is not asked
+    /// about again.
+    func answerChange(_ question: Untrusted, trusted: Bool) {
+        if trusted {
+            trust(question)
+        } else {
+            _ = lock.withLock { declined.insert(question.pin) }
         }
     }
 
@@ -89,9 +121,14 @@ final class ServerTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     }
 
     /// The addresses of the server in use from now on, none when no server is in use. Its
-    /// headers and client certificate go only to these.
-    func useServer(_ addresses: [URL]) {
-        lock.withLock { scope = ServerScope(addresses) }
+    /// headers and client certificate go only to these, and a sign-in page's headers only to its
+    /// gateway addresses.
+    func useServer(main: URL?, home: URL?) {
+        let next = main.map { ServerScope(main: $0, home: home) } ?? ServerScope()
+        lock.withLock {
+            scope = next
+            declined = []
+        }
     }
 
     /// The certificate the phone shows the server in use when it asks for one, from a PKCS #12
@@ -138,30 +175,37 @@ final class ServerTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         noteEnd(of: task.originalRequest, error)
     }
 
-    /// The one decision, shared with the audio loader.
+    /// The one decision, shared with the audio loader. These calls go to the server in use, so a
+    /// changed certificate on one of its hosts is asked about again.
     func answer(_ challenge: URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let (now, identity) = lock.withLock { (self.scope, self.client) }
-        return answer(challenge, scope: now, client: identity)
+        return answer(challenge, scope: now, client: identity, inUse: true)
     }
 
     /// A redirect of a call through the shared trust: the server's own headers stay only while it
-    /// goes to the server in use, or to where it was first sent. For sessions of their own too.
+    /// goes to the server in use, or to where it was first sent, and a sign-in page's only while
+    /// it goes to its gateway addresses. Calls through `ServerExchange` and the byte delegates
+    /// follow their client's own rule (`hop`); this one serves the background downloads and any
+    /// call without one. For sessions of their own too.
     func redirected(_ request: URLRequest, first: URLRequest?) -> URLRequest {
         let now = lock.withLock { self.scope }
         return Self.redirected(request, first: first, scope: now)
     }
 
     fileprivate static func redirected(_ request: URLRequest, first: URLRequest?, scope: ServerScope) -> URLRequest {
-        let drop = scope.headersToDrop(request.allHTTPHeaderFields ?? [:], to: request.url, first: first?.url)
+        let headers = request.allHTTPHeaderFields ?? [:]
+        var drop = scope.headersToDrop(headers, to: request.url, first: first?.url)
+        if !scope.isGatewayOrigin(request.url) { drop += headers.keys.filter { GatewayNames.isGatewayName($0) } }
         guard !drop.isEmpty else { return request }
         var out = request
         for name in drop { out.setValue(nil, forHTTPHeaderField: name) }
         return out
     }
 
-    /// Answers a challenge for a server with these addresses and this client certificate.
+    /// Answers a challenge for a server with these addresses and this client certificate. `inUse`
+    /// says the call goes to the server in use, rather than one a check looks at.
     fileprivate func answer(_ challenge: URLAuthenticationChallenge, scope: ServerScope,
-                            client: ClientIdentity?) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+                            client: ClientIdentity?, inUse: Bool = false) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let space = challenge.protectionSpace
         switch space.authenticationMethod {
         case NSURLAuthenticationMethodServerTrust:
@@ -172,13 +216,19 @@ final class ServerTrust: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
             guard let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else {
                 return (.cancelAuthenticationChallenge, nil)
             }
-            let fingerprint = Self.fingerprint(of: leaf)
+            let der = [UInt8](SecCertificateCopyData(leaf) as Data)
             let host = space.host.lowercased()
             let pinned = lock.withLock { pins[host] }
-            if pinned == fingerprint {
+            if let pinned, CertificatePins.matches(pinned, certificate: der) {
                 return (.useCredential, URLCredential(trust: trust))
             }
-            lock.withLock { rejected[host] = Untrusted(host: host, fingerprint: fingerprint) }
+            let question = Untrusted(host: host, fingerprint: Self.fingerprint(of: leaf), pin: CertificatePins.pin(ofCertificate: der))
+            let report: (@Sendable (Untrusted) -> Void)? = lock.withLock {
+                rejected[host] = question
+                let changed = inUse && pinned != nil && scope.isOwnHost(host) && !declined.contains(question.pin)
+                return changed ? certificateChanged : nil
+            }
+            report?(question)
             return (.cancelAuthenticationChallenge, nil)
         case NSURLAuthenticationMethodClientCertificate:
             // Shown only to the server's own hosts, never to any other.

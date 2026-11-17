@@ -25,12 +25,15 @@ import app.winters.octo.desktop.home.AlbumShelf
 import app.winters.octo.desktop.listening.LoggedPlay
 import app.winters.octo.desktop.listening.logged
 import app.winters.octo.desktop.nav.Page
-import app.winters.octo.desktop.pages.showSection
 import app.winters.octo.desktop.nav.ScrollSpot
 import app.winters.octo.desktop.secrets.SessionOnlySecrets
+import app.winters.octo.desktop.pages.askAboutChangedCertificate
 import app.winters.octo.desktop.server.Accounts
+import app.winters.octo.connection.GatewayWords
 import app.winters.octo.desktop.server.CertificateQuestion
 import app.winters.octo.desktop.server.SignInOutcome
+import app.winters.octo.subsonic.AuthMode
+import app.winters.octo.subsonic.gateway.Gateway
 import app.winters.octo.desktop.settings.AmbienceStyle
 import app.winters.octo.desktop.settings.DesktopOs
 import app.winters.octo.desktop.settings.SettingsStore
@@ -211,7 +214,7 @@ class ScreenShotsTest {
             val http = OkHttpClient()
             val accounts = Accounts(settings, SessionOnlySecrets(), http)
             lateinit var app: AppState
-            val player = EnginePlayer(NativeAudioEngine.open(silent = true), LocalOrServer(ServerSongs { app.connection?.client }))
+            val player = EnginePlayer(NativeAudioEngine.open(silent = true), LocalOrServer(ServerSongs(client = { app.connection?.client })))
             SwingUtilities.invokeAndWait {
                 app = AppState(settings, accounts, http, CoroutineScope(SupervisorJob() + Dispatchers.Main), DesktopOs.Windows, player, OnlineLyrics(http, server.address.toHttpUrl()), listeningRoot = File(folder.root, "listening"))
             }
@@ -265,7 +268,7 @@ class ScreenShotsTest {
             shot("signin", 2_000)
             SwingUtilities.invokeAndWait {
                 app.signInForm.typeAddress("music.example.com")
-                app.signInForm.question = CertificateQuestion("music.example.com", "d693f076d6d65fcb023dd052e3637561a6772c9cb3c51f9799d3b94e3c655443")
+                app.signInForm.question = CertificateQuestion("music.example.com", "d693f076d6d65fcb023dd052e3637561a6772c9cb3c51f9799d3b94e3c655443", "spki:" + "ab".repeat(32))
             }
             shot("signin-certificate")
             SwingUtilities.invokeAndWait {
@@ -273,14 +276,44 @@ class ScreenShotsTest {
                 app.signInForm.result = null
                 app.signInForm.advancedOpen = true
                 app.signInForm.home = "192.168.1.20:4533"
-                app.signInForm.addHeader()
-                app.signInForm.setHeaderName(0, "X-Access-Token")
-                app.signInForm.setHeaderValue(0, "secret")
+                val header = app.signInForm.addHeader()
+                app.signInForm.setHeaderName(header, "X-Access-Token")
+                app.signInForm.setHeaderValue(header, "secret")
             }
             shot("signin-advanced")
+            // A sign-in page answered: its group calls the failure out, and
+            // the pointer takes the result line's place.
+            SwingUtilities.invokeAndWait {
+                app.signInForm.result = false to GatewayWords.failure(Gateway.Authentik, false)
+                app.signInForm.failed(app.signInForm.attemptAddress, Gateway.Authentik)
+            }
+            shot("signin-gateway-callout")
+            // API key in the main card.
+            SwingUtilities.invokeAndWait {
+                app.signInForm.result = null
+                app.signInForm.pickMethod(AuthMode.ApiKey)
+            }
+            shot("signin-api-key")
+            // An invite: its fields in the main card, its sentence a note.
+            SwingUtilities.invokeAndWait {
+                app.signInForm.pickMethod(AuthMode.Token)
+                app.signInForm.takeJoinLink("https://music.example.com/family/join#invite=tok_9")
+            }
+            shot("signin-invite")
+            SwingUtilities.invokeAndWait { app.signInForm.leaveLink() }
             val done = runBlocking { accounts.signIn(server.address, "winters", "pw") } as SignInOutcome.Done
             SwingUtilities.invokeAndWait { app.signedIn(done.connection) }
             shot("home", 3_000)
+            // The server's certificate changed while in use: asked about again.
+            SwingUtilities.invokeAndWait {
+                askAboutChangedCertificate(
+                    app.popups,
+                    accounts.security,
+                    CertificateQuestion("music.example.com", "3f9c0e5a7b2d4c6e8f1a3b5c7d9e0f2a4b6c8d0e1f3a5b7c9d1e3f5a7b9c0d2e", "spki:" + "cd".repeat(32)),
+                )
+            }
+            shot("certificate-changed")
+            SwingUtilities.invokeAndWait { app.popups.close() }
             // Further down Home: playlists and the rediscovery shelves, by
             // leaving it scrolled and coming back.
             val home = app.navigator.current
@@ -521,10 +554,10 @@ class ScreenShotsTest {
             tap(400f, 278f)
             shot("settings-jump")
             // About starts with its card; on a narrow window too.
-            SwingUtilities.invokeAndWait { showSection("Settings", "about") }
+            SwingUtilities.invokeAndWait { app.openSettings("about") }
             shot("settings-about")
             SwingUtilities.invokeAndWait {
-                app.navigator.go(Page.Sound)
+                app.openSettings("sound")
                 app.sound?.update { withPreset(it, EqPresets.first { preset -> preset.name == "Bass Boost" }).copy(eqEnabled = true, replayGain = ReplayGainMode.Smart) }
             }
             shot("sound")
@@ -542,23 +575,21 @@ class ScreenShotsTest {
             }
             shot("sound-wide", on = wideSettings)
             // The equalizer's switch on the title's line, with no heading over its cards.
-            SwingUtilities.invokeAndWait { showSection("Sound", "eq") }
+            SwingUtilities.invokeAndWait { app.openSettings("sound", "eq") }
             shot("sound-wide-eq", on = wideSettings)
-            SwingUtilities.invokeAndWait { showSection("Sound", "output") }
+            SwingUtilities.invokeAndWait { app.openSettings("sound", "output") }
             wheel(60, wideSettings)
             shot("sound-wide-bottom", on = wideSettings)
-            SwingUtilities.invokeAndWait { app.navigator.go(Page.Settings) }
+            SwingUtilities.invokeAndWait { app.openSettings("servers") }
             shot("settings-wide", on = wideSettings)
             wheel(8, wideSettings)
             shot("settings-wide-middle", on = wideSettings)
-            SwingUtilities.invokeAndWait { showSection("Settings", "about") }
+            SwingUtilities.invokeAndWait { app.openSettings("about") }
             shot("settings-wide-about", on = wideSettings)
-            // Appearance's Home group, with its Reset on the group's line.
-            SwingUtilities.invokeAndWait { showSection("Settings", "look") }
-            shot(null, 600, wideSettings)
-            wheel(60, wideSettings)
+            // Home's shelves, with Reset on the group's line.
+            SwingUtilities.invokeAndWait { app.openSettings("home") }
             shot("settings-wide-home-sections", on = wideSettings)
-            SwingUtilities.invokeAndWait { showSection("Settings", "servers") }
+            SwingUtilities.invokeAndWait { app.openSettings("servers") }
             wideSettings.close()
             // The narrowest window: the list of sections is left out.
             val narrow = ImageComposeScene(960, 640, Density(1f)) {

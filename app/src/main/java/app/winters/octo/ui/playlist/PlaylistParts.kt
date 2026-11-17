@@ -140,10 +140,11 @@ fun PlaylistLine(
 // The top of a song-list page: its picture and name, then one quiet line
 // with its size, length and `facts`, then one control line with round Play
 // and Shuffle, once there is something to play, and More (`onMore`) at the end.
+// A `songCount` of null is not known yet: the line holds only `facts` until it is.
 @Composable
 fun ListHeader(
     title: String,
-    songCount: Int,
+    songCount: Int?,
     durationMs: Long,
     onPlay: () -> Unit,
     onShuffle: () -> Unit,
@@ -167,11 +168,16 @@ fun ListHeader(
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
-        if (songCount > 0 || onMore != null) {
+        // Play and Shuffle hold their place, dimmed, while the size is still
+        // being counted, so the line never shifts when it comes; a list
+        // counted empty has none.
+        val playable = (songCount ?: 0) > 0
+        val counting = songCount == null
+        if (playable || counting || onMore != null) {
             HeaderControlLine(
                 control = null,
                 actions = {
-                    if (songCount > 0) PlayShuffleButtons(onPlay, onShuffle)
+                    if (playable || counting) PlayShuffleButtons(onPlay, onShuffle, enabled = playable)
                     if (onMore != null) HeaderButton(OctoIcons.More, "More", onMore, Modifier.pressSpot(LocalPressSpot.current))
                 },
                 modifier = Modifier.padding(start = 12.dp, end = 16.dp, top = 10.dp),
@@ -181,9 +187,10 @@ fun ListHeader(
 }
 
 // The quiet line under a list's name: its songs, their length once there
-// are any, then anything more the page says about it.
-fun listHeaderFacts(songCount: Int, durationMs: Long, facts: List<String>): List<String> =
-    listOfNotNull(songs(songCount), if (songCount == 0) null else (durationMs / 1000).toInt().asLength()) + facts
+// are any, then anything more the page says about it. Neither shows before
+// the count is known (null).
+fun listHeaderFacts(songCount: Int?, durationMs: Long, facts: List<String>): List<String> =
+    listOfNotNull(songCount?.let { songs(it) },if (songCount == null || songCount == 0) null else (durationMs / 1000).toInt().asLength()) + facts
 
 // A plain line under the header when a list has nothing in it.
 @Composable

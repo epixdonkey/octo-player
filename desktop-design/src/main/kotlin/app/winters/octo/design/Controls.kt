@@ -39,7 +39,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.semantics.Role
@@ -48,6 +47,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.awtRole
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.text.TextStyle
 import javax.accessibility.AccessibleRole
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -56,7 +56,8 @@ import androidx.compose.ui.unit.dp
 // the pointer. `active` marks a mode that is on (shuffle, repeat, an open
 // panel) with the accent, never a border. `toggled`, when given, tells a
 // screen reader it is a switch that is on or off. Resting the pointer on
-// it shows `tooltip` (its description, unless told otherwise).
+// it shows `tooltip` (its description, unless told otherwise). `exact`
+// draws the glyph as written, for one at a size outside the icon sizes.
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun IconAction(
@@ -65,12 +66,13 @@ fun IconAction(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     size: Dp = 36.dp,
-    iconSize: Dp = 20.dp,
+    iconSize: Dp = IconSize.Transport,
     enabled: Boolean = true,
     active: Boolean = false,
-    tint: Color = Color.White,
+    tint: Color = OctoColors.TextPrimary,
     toggled: Boolean? = null,
     tooltip: String = description,
+    exact: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val tip = rememberTooltipState()
@@ -101,7 +103,7 @@ fun IconAction(
         contentAlignment = Alignment.Center,
     ) {
         // An active one (shuffle on, a panel open) glows rather than changing colour.
-        GlowIcon(rememberVectorPainter(icon), tint = tint, lit = active, modifier = Modifier.size(iconSize))
+        GlowIcon(if (exact) exactPainter(icon) else crispPainter(icon), tint = tint, lit = active, modifier = Modifier.size(iconSize))
         TooltipPopup(tip, tooltip)
     }
 }
@@ -130,10 +132,10 @@ fun GlazeCapsule(
         Row(
             modifier
                 .height(height)
-                .buttonMotion(look, CircleShape)
+                .buttonMotion(look, CircleShape, OctoColors.FocusRing)
                 .alpha(if (enabled) 1f else OctoInk.DisabledAlpha)
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = if (held) 0.12f else 0.08f))
+                .background(OctoColors.TextPrimary.copy(alpha = if (held) 0.12f else 0.08f))
                 .hoverable(interaction)
                 .pointerHoverIcon(PointerIcon.Hand)
                 .tabStop(LocalTabStops.current)
@@ -143,16 +145,16 @@ fun GlazeCapsule(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (icon != null) Glyph(icon, size = 16.dp, tint = ink)
-            Txt(text, OctoType.label, ink)
-            Glyph(OctoIcons.Chevron, Modifier.rotate(90f), size = IconSize.Inline - Space.Xxs, tint = OctoColors.TextMuted)
+            if (icon != null) Glyph(icon, size = IconSize.Table, tint = ink)
+            Txt(text, OctoType.label, ink, control = true)
+            Glyph(OctoIcons.Chevron, Modifier.rotate(90f), size = IconSize.Inline - Space.Xxs, tint = OctoColors.TextMuted, exact = true)
         }
         return
     }
     Glaze(
         modifier
             .height(height)
-            .buttonMotion(look, CircleShape)
+            .buttonMotion(look, CircleShape, OctoColors.FocusRing)
             .alpha(if (enabled) 1f else OctoInk.DisabledAlpha)
             .hoverable(interaction)
             .pointerHoverIcon(PointerIcon.Hand)
@@ -166,8 +168,8 @@ fun GlazeCapsule(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (icon != null) Glyph(icon, size = 20.dp)
-            Txt(text, OctoType.label)
+            if (icon != null) Glyph(icon, size = IconSize.Transport)
+            Txt(text, OctoType.label, control = true)
         }
     }
 }
@@ -192,7 +194,7 @@ fun GlazeRound(
     Glaze(
         modifier
             .size(size)
-            .buttonMotion(look, CircleShape)
+            .buttonMotion(look, CircleShape, OctoColors.FocusRing)
             .alpha(if (enabled) 1f else OctoInk.DisabledAlpha)
             .hoverable(interaction)
             .pointerHoverIcon(PointerIcon.Hand)
@@ -202,15 +204,24 @@ fun GlazeRound(
             .semantics { contentDescription = description },
         light = if (lit || look.hovered || look.pressed) GlazeLight.Lifted else GlazeLight.Rest,
     ) {
-        Glyph(icon, size = 18.dp)
+        Glyph(icon, size = IconSize.Toolbar)
         TooltipPopup(tip, description)
     }
 }
 
 // A quiet action in words: accent text that lifts under the pointer, with
-// no border and no fill.
+// no border and no fill. `style` sets it in the words beside it instead, as
+// under a list row's own lines.
 @Composable
-fun TextAction(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, icon: ImageVector? = null, checked: Boolean? = null) {
+fun TextAction(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    checked: Boolean? = null,
+    style: TextStyle = OctoType.label,
+) {
     // With `checked` it is a switch, in white while on.
     val press = if (checked == null) {
         Modifier.clickable(interactionSource = null, indication = FocusRing(CircleShape), enabled = enabled, role = Role.Button, onClick = onClick)
@@ -228,8 +239,8 @@ fun TextAction(text: String, onClick: () -> Unit, modifier: Modifier = Modifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (icon != null) Glyph(icon, size = 16.dp, tint = tint)
-        Txt(text, OctoType.label, tint)
+        if (icon != null) Glyph(icon, size = IconSize.Table, tint = tint)
+        Txt(text, style, tint, control = true)
     }
 }
 
@@ -308,14 +319,15 @@ fun <T> GlazeSegments(
 }
 
 // The check shown before the chosen segment's words, and the gap after it.
-val SegmentCheck = 14.dp
+val SegmentCheck = IconSize.Inline
 val SegmentCheckGap = 4.dp
 
 // A ring that fills as something downloads; with no fraction known it turns.
 @Composable
 fun ProgressRing(fraction: Float?, modifier: Modifier = Modifier, size: Dp = 22.dp) {
+    val ink = OctoColors.TextPrimary
     if (fraction == null) {
-        Spinner(modifier, size, Color.White.copy(alpha = 0.8f))
+        Spinner(modifier, size, ink.copy(alpha = 0.8f))
         return
     }
     val shown by animateFloatAsState(fraction.coerceIn(0f, 1f), octoTween(motionScale(), OctoDuration.Neutral), label = "ring")
@@ -323,8 +335,8 @@ fun ProgressRing(fraction: Float?, modifier: Modifier = Modifier, size: Dp = 22.
         val stroke = this.size.minDimension * 0.12f
         val inset = Offset(stroke / 2, stroke / 2)
         val box = Size(this.size.width - stroke, this.size.height - stroke)
-        drawArc(Color.White.copy(alpha = 0.18f), 0f, 360f, false, inset, box, style = Stroke(stroke))
-        drawArc(Color.White, -90f, 360f * shown, false, inset, box, style = Stroke(stroke, cap = StrokeCap.Round))
+        drawArc(ink.copy(alpha = 0.18f), 0f, 360f, false, inset, box, style = Stroke(stroke))
+        drawArc(ink, -90f, 360f * shown, false, inset, box, style = Stroke(stroke, cap = StrokeCap.Round))
     }
 }
 
@@ -334,10 +346,11 @@ fun ProgressRing(fraction: Float?, modifier: Modifier = Modifier, size: Dp = 22.
 @Composable
 fun MeterLine(fraction: Float?, modifier: Modifier = Modifier) {
     val shown by animateFloatAsState((fraction ?: 0f).coerceIn(0f, 1f), octoTween(motionScale(), OctoDuration.Neutral), label = "line")
+    val ink = OctoColors.TextPrimary
     Canvas(modifier.fillMaxWidth().height(MeterLineHeight)) {
         val round = CornerRadius(size.height / 2)
-        drawRoundRect(Color.White.copy(alpha = 0.18f), cornerRadius = round)
-        if (fraction != null && shown > 0f) drawRoundRect(Color.White, size = Size(size.width * shown, size.height), cornerRadius = round)
+        drawRoundRect(ink.copy(alpha = 0.18f), cornerRadius = round)
+        if (fraction != null && shown > 0f) drawRoundRect(ink, size = Size(size.width * shown, size.height), cornerRadius = round)
     }
 }
 

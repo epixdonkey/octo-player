@@ -85,7 +85,6 @@ import app.winters.octo.design.MenuTitle
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
-import app.winters.octo.design.PauseGlyph
 import app.winters.octo.design.Scrubber
 import app.winters.octo.design.Space
 import app.winters.octo.design.Spinner
@@ -106,6 +105,8 @@ import app.winters.octo.desktop.player.PlayerState
 import app.winters.octo.desktop.player.RepeatMode
 import app.winters.octo.desktop.player.formatLabel
 import app.winters.octo.desktop.startRadio
+import app.winters.octo.desktop.versions.offersStreamVersions
+import app.winters.octo.versions.StreamVersionWords
 import app.winters.octo.desktop.system.MiniPlayerButton
 import app.winters.octo.desktop.system.isOpenedFile
 import app.winters.octo.playback.SLEEP_EXTENSIONS
@@ -233,7 +234,7 @@ private fun SongZone(app: AppState, song: Song?) {
             FetchButton(app, song, ControlHeight.M, IconSize.Toolbar, tint = OctoColors.TextPrimary)
         } else if (song != null) {
             val starred = app.isStarred(song)
-            IconAction(if (starred) OctoIcons.Liked else OctoIcons.Like, if (starred) "Remove from favorites" else "Add to favorites", { app.setStarred(listOf(song), !starred) }, size = ControlHeight.M, iconSize = IconSize.Toolbar)
+            IconAction(if (starred) OctoIcons.Liked else OctoIcons.Like, if (starred) "Remove from favorites" else "Add to favorites", { app.setStarred(listOf(song), !starred) }, size = ControlHeight.M, iconSize = IconSize.Toolbar, tint = if (starred) OctoColors.Highlight else OctoColors.TextPrimary)
         }
     }
 }
@@ -259,7 +260,7 @@ private fun Transport(app: AppState, state: PlayerState) {
     Row(Modifier.padding(horizontal = Space.M), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.Xs)) {
         IconAction(OctoIcons.Shuffle, "Shuffle", { app.player.setShuffle(!state.shuffle) }, size = ControlHeight.M, iconSize = IconSize.Toolbar, active = state.shuffle, toggled = state.shuffle)
         IconAction(OctoIcons.Previous, "Previous", app.player::previous, size = ControlHeight.L, iconSize = IconSize.Transport, enabled = song != null)
-        PlayButton(state.playing, enabled = song != null, size = PlayTarget, glyph = IconSize.Transport * PlayScale, waiting = state.buffering) { app.player.togglePlay() }
+        PlayButton(state.playing, enabled = song != null, size = PlayTarget, glyph = IconSize.Lead, waiting = state.buffering) { app.player.togglePlay() }
         IconAction(OctoIcons.Next, "Next", app.player::next, size = ControlHeight.L, iconSize = IconSize.Transport, enabled = song != null)
         val repeat = state.repeat
         IconAction(
@@ -333,9 +334,9 @@ private fun UtilityZone(app: AppState, state: PlayerState, compact: Boolean = fa
     Row(horizontalArrangement = Arrangement.spacedBy(Space.Xxs), verticalAlignment = Alignment.CenterVertically) {
         if (!compact) {
             // A station has no lyrics.
-            if (state.live == null) IconAction(OctoIcons.Lyrics, "Lyrics", { app.toggleSidePanel(SidePanel.Lyrics) }, size = ControlHeight.M, iconSize = IconSize.Toolbar, active = app.sidePanel == SidePanel.Lyrics, toggled = app.sidePanel == SidePanel.Lyrics)
+            if (state.live == null) IconAction(OctoIcons.Lyrics, "Lyrics", { app.toggleSidePanel(SidePanel.Lyrics) }, size = ControlHeight.M, iconSize = IconSize.Toolbar, active = app.shownPanel == SidePanel.Lyrics, toggled = app.shownPanel == SidePanel.Lyrics)
             // A station alone has no stations to list.
-            if (state.live == null || state.queue.size > 1) IconAction(OctoIcons.Queue, if (state.live != null) "Stations" else "Queue", { app.toggleSidePanel(SidePanel.Queue) }, size = ControlHeight.M, iconSize = IconSize.Toolbar, active = app.sidePanel == SidePanel.Queue, toggled = app.sidePanel == SidePanel.Queue)
+            if (state.live == null || state.queue.size > 1) IconAction(OctoIcons.Queue, if (state.live != null) "Stations" else "Queue", { app.toggleSidePanel(SidePanel.Queue) }, size = ControlHeight.M, iconSize = IconSize.Toolbar, active = app.shownPanel == SidePanel.Queue, toggled = app.shownPanel == SidePanel.Queue)
         }
         VolumeButton(app, state.volume)
         MoreButton(app, state, compact)
@@ -370,8 +371,8 @@ private fun ColumnScope.MoreMenu(app: AppState, close: () -> Unit, compact: Bool
             MenuRow("Open the player", { app.fullPlayer = true; close() }, OctoIcons.Expand, enabled = now.current != null)
             // The panel buttons, when the player is too narrow to show them.
             if (compact) {
-                if (live == null) MenuRow("Lyrics", { app.toggleSidePanel(SidePanel.Lyrics); close() }, if (app.sidePanel == SidePanel.Lyrics) OctoIcons.Check else OctoIcons.Lyrics)
-                if (live == null || now.queue.size > 1) MenuRow(if (live != null) "Stations" else "Queue", { app.toggleSidePanel(SidePanel.Queue); close() }, if (app.sidePanel == SidePanel.Queue) OctoIcons.Check else OctoIcons.Queue)
+                if (live == null) MenuRow("Lyrics", { app.toggleSidePanel(SidePanel.Lyrics); close() }, if (app.shownPanel == SidePanel.Lyrics) OctoIcons.Check else OctoIcons.Lyrics)
+                if (live == null || now.queue.size > 1) MenuRow(if (live != null) "Stations" else "Queue", { app.toggleSidePanel(SidePanel.Queue); close() }, if (app.shownPanel == SidePanel.Queue) OctoIcons.Check else OctoIcons.Queue)
             }
             MenuRow("Play on", { page = MorePage.Output }, outputIcon(now.playingOn?.name), more = true, detail = now.playingOn?.name ?: "System default")
             MenuSeparator()
@@ -395,6 +396,16 @@ private fun ColumnScope.MoreMenu(app: AppState, close: () -> Unit, compact: Bool
             val song = now.current?.song
             MenuRow("Start radio", { song?.let(app::startRadio); close() }, OctoIcons.Radio, enabled = song != null && app.connection != null && !isOpenedFile(song.id))
             MenuRow("Song details", { app.showInfo(null); close() }, OctoIcons.Info, enabled = now.current != null, detail = formatLabel(now.format))
+            // Another YouTube video for a song found online, on a server that
+            // lets this person pick one, as the phones offer it (never a
+            // grayed row on every library song); the menu closes first, so
+            // the dialog takes its place.
+            if (app.offersStreamVersions(now.current)) {
+                MenuRow(StreamVersionWords.MENU_ROW, {
+                    close()
+                    now.current?.let { showStreamVersions(app, it) }
+                }, OctoIcons.LeftRight)
+            }
             app.toggleMiniPlayer?.let { toggle -> MenuRow("Mini player", { toggle(); close() }, OctoIcons.Expand) }
         }
         MorePage.Output -> OutputMenu(app, back = { page = MorePage.Main }, close = close)
@@ -432,7 +443,8 @@ private fun ColumnScope.SleepMenu(app: AppState, sleep: SleepState, back: () -> 
 // a half times theirs), in a round target `size` across that lifts under
 // the pointer and shrinks a touch when pressed, as theirs do. While waiting
 // for sound a spinner turns in its place. For a live station (`stop`) it is
-// Play and Stop.
+// Play and Stop. `exact` draws the sign as written, for a `glyph` that is
+// not one of the icon sizes.
 @Composable
 fun PlayButton(
     playing: Boolean,
@@ -443,6 +455,7 @@ fun PlayButton(
     label: String? = null,
     stop: Boolean = false,
     tint: Color = OctoColors.TextPrimary,
+    exact: Boolean = false,
     onClick: () -> Unit,
 ) {
     val tip = rememberTooltipState()
@@ -468,8 +481,8 @@ fun PlayButton(
         when {
             waiting && playing -> Spinner(size = glyph * 0.8f, color = tint)
             playing && stop -> StopGlyph(tint, size = glyph)
-            playing -> PauseGlyph(tint, size = glyph)
-            else -> Glyph(OctoIcons.Play, size = glyph, tint = tint)
+            playing -> Glyph(OctoIcons.Pause, size = glyph, tint = tint, exact = exact)
+            else -> Glyph(OctoIcons.Play, size = glyph, tint = tint, exact = exact)
         }
         TooltipPopup(tip, words)
     }
@@ -489,7 +502,7 @@ fun PlayBadge(size: Dp, label: String, onClick: () -> Unit) {
             .semantics { contentDescription = label },
         light = GlazeLight.Lifted,
     ) {
-        Glyph(OctoIcons.Play, size = size * 0.48f)
+        Glyph(OctoIcons.Play, size = size * 0.48f, exact = true)
         TooltipPopup(tip, "Play")
     }
 }

@@ -5,6 +5,7 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import app.winters.octo.playback.FadeCurve
 import app.winters.octo.playback.FILTER_STRENGTH
+import app.winters.octo.playback.LATE_MOVE_UNBOUNDED
 import app.winters.octo.playback.MIX_ONLY_HEADROOM_DB
 import app.winters.octo.playback.TransitionKind
 import app.winters.octo.playback.TransitionPlan
@@ -53,7 +54,7 @@ class TransitionShaperTest {
         beatMs: Double? = null,
         beatAnchorMs: Double? = null,
         rate: Double? = null,
-    ) = TransitionPlan(start, entry, overlap, TransitionKind.BLEND, k, strength, rate, beatMs, beatAnchorMs, false, headroomDb, "test")
+    ) = TransitionPlan(start, entry, overlap, TransitionKind.BLEND, k, strength, rate, beatMs, beatAnchorMs, false, headroomDb, "test", lateMoveBars = LATE_MOVE_UNBOUNDED)
 
     // `frames` mono frames at a fixed level, 16-bit.
     private fun level(frames: Int, value: Short = 16_384): ByteBuffer {
@@ -357,5 +358,111 @@ class TransitionShaperTest {
         assertEquals(0.5f, out.first(), 0.5f * 0.02f)
         val biggestStep = (1 until out.size).maxOf { abs(out[it] - out[it - 1]) }
         assertTrue("$biggestStep", biggestStep <= 0.5f / (rate * TRANSITION_SLEW_MS / 1_000).toFloat() * 1.01f)
+    }
+
+    // A stereo sine for the shaper, `frames` long from frame `from`.
+    private fun sweepInput(frames: Int, from: Int): FloatArray =
+        FloatArray(frames * 2) { i -> (0.5 * sin(2 * PI * 220 * (from + i / 2) / rate)).toFloat() }
+
+    // A copy taken mid-sweep shapes the same stretch again sample for
+    // sample: filters, volume and the early-fade gate all carried over.
+    @Test
+    fun aSnapshotShapesTheSameStretchAgainSampleForSample() {
+        val p = plan(start = 0, overlap = 4_000, strength = FILTER_STRENGTH, headroomDb = 3.0)
+        val first = TransitionShaper(rate, 2)
+        first.arm(DeckTransition("a", p, incoming = false, gateDb = -60.0), 0.0)
+        val per = 1_000.0 / rate
+        var at = 0
+        repeat(40) {
+            first.process(sweepInput(1_000, at), 1_000, at * per, per)
+            at += 1_000
+        }
+        val copy = TransitionShaper(rate, 2)
+        copy.copyFrom(first)
+        val a = sweepInput(9_000, at)
+        val b = a.copyOf()
+        first.process(a, 9_000, at * per, per)
+        copy.process(b, 9_000, at * per, per)
+        for (i in a.indices) assertEquals("sample $i", a[i], b[i], 0f)
+    }
+
+    // A disarm takes the song from where the sweep left it to its own
+    // volume and sound in a straight line, with no step where it starts.
+    @Test
+    fun aDisarmGoesStraightFromTheShapedSoundToTheSongsOwn() {
+        val p = plan(start = 0, overlap = 4_000, strength = FILTER_STRENGTH)
+        val s = TransitionShaper(rate, 2)
+        s.arm(DeckTransition("a", p, incoming = false), 0.0)
+        val per = 1_000.0 / rate
+        val before = sweepInput(96_000, 0)
+        s.process(before, 96_000, 0.0, per)
+        assertTrue(s.level < 0.9)
+        val ramp = 12_000
+        val start = s.level
+        s.disarm(ramp.toLong())
+        val after = sweepInput(ramp + 4_800, 96_000)
+        val plain = after.copyOf()
+        // Half way through the 250 ms the volume is half way home.
+        val half = after.copyOfRange(0, ramp)
+        s.process(half, ramp / 2, 96_000 * per, per)
+        assertEquals(start + (1 - start) / 2, s.level, 0.01)
+        half.copyInto(after, 0, 0, ramp)
+        val rest = after.copyOfRange(ramp, after.size)
+        s.process(rest, ramp / 2 + 4_800, (96_000 + ramp / 2) * per, per)
+        rest.copyInto(after, ramp)
+        // No step at the start beyond the sine's own.
+        val step = abs(after[0] - before[before.size - 2])
+        assertTrue("step $step", step < 0.05f)
+        // The song's own sound once the ramp is done, exactly.
+        for (i in ramp * 2 until after.size) assertEquals("sample $i", plain[i], after[i], 0f)
+        assertEquals(1.0, s.level, 0.0)
+    }
+
+    // The outgoing song's volume every 10 ms of its song from 0 to `endMs`,
+    // a steady half-scale sound with nothing in `quiet`, under a -50 dB
+    // silence gate. The plan starts at song time 0.
+    private fun levelsThrough(p: TransitionPlan, quiet: ClosedFloatingPointRange<Double>, endMs: Double): Map<Int, Double> {
+        val s = TransitionShaper(rate, 2)
+        s.arm(DeckTransition("a", p, incoming = false, gateDb = -50.0), 0.0)
+        val block = rate / 100
+        val buffer = FloatArray(block * 2)
+        val levels = HashMap<Int, Double>()
+        var ms = 0
+        while (ms < endMs) {
+            buffer.fill(if (ms.toDouble() in quiet) 0f else 0.5f)
+            s.process(buffer, block, ms.toDouble(), 1_000.0 / rate)
+            levels[ms] = s.level
+            ms += 10
+        }
+        return levels
+    }
+
+    private fun heldPlan(kind: TransitionKind, overlap: Long, holdShare: Double) =
+        TransitionPlan(0, 0, overlap, kind, 0.4, 0.0, null, null, null, false, 0.0, "test", holdShare = holdShare, riseShare = 0.1, lateMoveBars = LATE_MOVE_UNBOUNDED)
+
+    @Test
+    fun theSilenceGateListensOnlyFromTheHoldsEnd() {
+        // A 14 s intro holding A for its first half, and a cut whose
+        // incoming song enters 1.2 s before its first sound.
+        val intro = heldPlan(TransitionKind.INTRO, 14_000, 0.5)
+        val cut = heldPlan(TransitionKind.CUT, 4_000, 0.3)
+        for ((p, holdEnd) in listOf(intro to 7_000, cut to 1_200)) {
+            // Half a second of silence at 40% of the hold: A stays at its
+            // own level through the hold and is never marked faded.
+            val silentAt = holdEnd * 0.4
+            val held = levelsThrough(p, silentAt..silentAt + 500, holdEnd + 500.0)
+            for ((ms, level) in held) if (ms < holdEnd) assertEquals("${p.kind} at $ms ms", 1.0, level, 0.0)
+            val after = holdEnd + 200
+            val want = DeckTransition("a", p, incoming = false).gainAt(after / p.overlapMs.toDouble())
+            assertEquals("${p.kind} after the hold follows its curve", want, held.getValue(after), 0.01)
+
+            // The same silence after the hold: the gate acts once it has
+            // lasted its 300 ms, and the song stays faded after it.
+            val late = (holdEnd + 300).toDouble()
+            val gated = levelsThrough(p, late..late + 500, late + 800)
+            assertTrue("${p.kind} before the gate", gated.getValue((late - 10).toInt()) > 0.5)
+            assertEquals("${p.kind} faded inside the silence", 0.0, gated.getValue((late + 450).toInt()), 0.0)
+            assertEquals("${p.kind} still faded after it", 0.0, gated.getValue((late + 700).toInt()), 0.0)
+        }
     }
 }

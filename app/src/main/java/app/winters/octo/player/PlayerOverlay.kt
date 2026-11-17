@@ -1,8 +1,5 @@
 package app.winters.octo.player
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
@@ -90,7 +87,6 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -108,7 +104,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.min
 import androidx.compose.ui.unit.sp
-import androidx.core.view.WindowCompat
+import app.winters.octo.theme.BarWish
+import app.winters.octo.theme.LocalBarRequest
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
@@ -146,6 +143,7 @@ import app.winters.octo.design.Glaze
 import app.winters.octo.design.IconAccent
 import app.winters.octo.design.LineSlider
 import app.winters.octo.design.rememberIconAccent
+import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
 import app.winters.octo.design.elevation3
@@ -171,6 +169,7 @@ import app.winters.octo.ui.common.swipeSkip
 import app.winters.octo.ui.common.AddToLibraryButton
 import app.winters.octo.ui.common.LocalChoiceSheet
 import app.winters.octo.ui.common.LocalHaze
+import app.winters.octo.ui.common.LocalOwnedFinds
 import app.winters.octo.ui.common.LocalPressSpot
 import app.winters.octo.ui.common.pressSpot
 import app.winters.octo.ui.common.rememberOpenedBeside
@@ -233,7 +232,7 @@ fun AnimatedVisibilityScope.PlayerOverlay(
     val ticker = remember { FrameTicker() }
     // What the glasses over the background draw from while the wash is a
     // picture.
-    val glass = remember { WashGlass() }
+    val glass = remember { WashGlass() }.also { it.base = OctoColors.Background.toArgb() }
     val close by rememberUpdatedState(onClose)
     val scope = rememberCoroutineScope()
     // How far the player has been pulled down, in pixels.
@@ -1039,6 +1038,9 @@ private fun CoverFill(ref: String?) {
     }
 }
 
+// How strong the artist line under the full player's title is.
+private const val ArtistLineAlpha = 0.72f
+
 // The song's name and artist, close together so they read as one. A name
 // too long for its room scrolls through (unless motion is `calm`), and
 // either line too long fades out at its end. The name also carries Close
@@ -1063,9 +1065,12 @@ private fun TitleBlock(now: NowPlaying, calm: Boolean, onOpenArtist: (String) ->
                 overflow = TextOverflow.Clip,
             )
             Text(
-                song.artist.orEmpty(),
+                // While a play starts, the words say so in the artist's place.
+                song.starting ?: song.artist.orEmpty(),
                 style = OctoType.body,
-                color = accentInk,
+                // The title's white a step back, which reads at 4.5:1 or
+                // better on the player's colors, where the accent ink did not.
+                color = LocalContentColor.current.copy(alpha = ArtistLineAlpha),
                 maxLines = 1,
                 softWrap = false,
                 overflow = TextOverflow.Clip,
@@ -1082,11 +1087,13 @@ private fun TitleBlock(now: NowPlaying, calm: Boolean, onOpenArtist: (String) ->
 }
 
 // Beside the song: a heart for Liked songs, glowing while it is in them,
-// or the add button for a song not in the library, and the song's menu.
+// or the add button for a song not in the library, and the song's menu. A
+// song the server owns that the phone's copy has not brought in yet has the
+// heart, as any library song does.
 @Composable
 private fun SongButtons(now: NowPlaying, model: PlayerViewModel) {
     val menu = LocalSongMenu.current
-    if (now.trackId != null && isFind(now.trackId)) {
+    if (now.trackId != null && isFind(now.trackId) && now.trackId !in LocalOwnedFinds.current) {
         val find by model.find.collectAsStateWithLifecycle()
         // Held back until the find for this song has loaded, not the last one.
         find?.takeIf { it.id == now.trackId }?.let { AddToLibraryButton(it, size = TitleButtonSize, iconSize = titleIcons().size) }
@@ -1433,34 +1440,16 @@ private fun SleepCircle(model: PlayerViewModel, onClick: () -> Unit) {
 }
 
 // Light status and navigation icons while the player is open (dark ones
-// over a light background), whatever the rest of the app uses, put back
-// as they were when it closes. The status icons can follow something else
-// at the top (`darkStatus`, a tall loop's top).
+// over a light background), whatever the rest of the app uses, given up
+// when it closes. The root draws the bars; this only asks. The status icons
+// can follow something else at the top (`darkStatus`, a tall loop's top).
 @Composable
 private fun LightOnDarkBars(darkIcons: Boolean, darkStatus: Boolean = darkIcons) {
-    val view = LocalView.current
-    DisposableEffect(view) {
-        val window = view.context.findActivity()?.window ?: return@DisposableEffect onDispose { }
-        val bars = WindowCompat.getInsetsController(window, view)
-        val status = bars.isAppearanceLightStatusBars
-        val navigation = bars.isAppearanceLightNavigationBars
-        onDispose {
-            bars.isAppearanceLightStatusBars = status
-            bars.isAppearanceLightNavigationBars = navigation
-        }
+    val request = LocalBarRequest.current
+    DisposableEffect(darkIcons, darkStatus) {
+        request.value = BarWish(statusLight = darkStatus, navigationLight = darkIcons)
+        onDispose { request.value = null }
     }
-    LaunchedEffect(view, darkIcons, darkStatus) {
-        val window = view.context.findActivity()?.window ?: return@LaunchedEffect
-        val bars = WindowCompat.getInsetsController(window, view)
-        bars.isAppearanceLightStatusBars = darkStatus
-        bars.isAppearanceLightNavigationBars = darkIcons
-    }
-}
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
 }
 
 // The song's name in the player.

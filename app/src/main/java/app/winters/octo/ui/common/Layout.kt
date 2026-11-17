@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.winters.octo.design.GlazedIconButton
@@ -28,14 +26,10 @@ fun screenPadding(extraTop: Dp = 0.dp): PaddingValues {
     return PaddingValues(top = top + 8.dp + extraTop, bottom = bottom + 120.dp)
 }
 
+// A tab's big title, on the same line and baseline as every page header's.
 @Composable
 fun ScreenTitle(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        style = OctoType.display,
-        color = OctoColors.TextPrimary,
-        modifier = modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 16.dp),
-    )
+    PageHeader(text, onBack = null, modifier = modifier)
 }
 
 @Composable
@@ -51,16 +45,18 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) {
 // Detail pages start low enough to clear the floating back button.
 val DetailTopGap = 56.dp
 
-// The round back button that floats over a detail page.
+// The round back button that floats over a detail page. While `enabled` is
+// false it shows dimmed and takes no press.
 @Composable
-fun BackButton(onBack: () -> Unit) {
+fun BackButton(onBack: () -> Unit, enabled: Boolean = true) {
     Box(Modifier.statusBarsPadding().padding(start = 16.dp, top = 8.dp)) {
         GlazedIconButton(
             backdrop = LocalHaze.current,
-            icon = ImageVector.vectorResource(OctoIcons.Back),
+            icon = LocalIconVectors.current(OctoIcons.Back),
             contentDescription = "Back",
             onClick = onBack,
             size = 40.dp,
+            enabled = enabled,
         )
     }
 }
@@ -73,17 +69,19 @@ fun Int.asClock(): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
-// Album or playlist length in words, like 48 min or 1 hr 12 min.
+// Album or playlist length in words, like 48 min, 1 hr 12 min or
+// 7,489 hr 27 min.
 fun Int.asLength(): String {
     val minutes = (this + 30) / 60
-    return if (minutes >= 60) "${minutes / 60} hr ${minutes % 60} min" else "$minutes min"
+    return if (minutes >= 60) "%,d hr %d min".format(minutes / 60, minutes % 60) else "$minutes min"
 }
 
-fun songs(count: Int) = if (count == 1) "1 song" else "$count songs"
+// "1 song", "12 songs", "200,000 songs".
+fun songs(count: Int) = if (count == 1) "1 song" else "%,d songs".format(count)
 
-fun albums(count: Int) = if (count == 1) "1 album" else "$count albums"
+fun albums(count: Int) = if (count == 1) "1 album" else "%,d albums".format(count)
 
-fun artists(count: Int) = if (count == 1) "1 artist" else "$count artists"
+fun artists(count: Int) = if (count == 1) "1 artist" else "%,d artists".format(count)
 
 // A fact with each number held to the word beside it ("56 min", "15 songs",
 // "Rated 4.3"), so a line of facts only breaks between facts.

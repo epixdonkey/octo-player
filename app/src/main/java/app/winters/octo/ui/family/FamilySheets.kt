@@ -7,8 +7,12 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
 import app.winters.octo.design.GlassInput
-import app.winters.octo.server.passwordChangeWords
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.winters.octo.server.passwordDraftProblem
+import app.winters.octo.connection.SignInWords
+import app.winters.octo.ui.common.rememberStillDrawn
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.flow.StateFlow
 import app.winters.octo.server.PasswordDraft
 import app.winters.octo.server.PasswordChange
 import app.winters.octo.subsonic.familyAppLink
@@ -62,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -102,6 +107,7 @@ import app.winters.octo.design.MonoFontFamily
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoDuration
 import app.winters.octo.design.OctoIcons
+import app.winters.octo.design.OctoInk
 import app.winters.octo.design.OctoType
 import app.winters.octo.design.SheetFill
 import app.winters.octo.design.motionScale
@@ -118,9 +124,9 @@ import java.time.Instant
 // navigation bar, and when the rest still can't fit, a fade and a "More
 // below" button say so.
 
-private val Hairline = Color.White.copy(alpha = 0.08f)
-private val Fill = Color.White.copy(alpha = 0.04f)
-private val Edge = Color.White.copy(alpha = 0.08f)
+private val Hairline: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.08f)
+private val Fill: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.04f)
+private val Edge: Color @Composable @ReadOnlyComposable get() = OctoColors.TextPrimary.copy(alpha = 0.08f)
 private val CardShape = RoundedCornerShape(14.dp)
 private val WellShape = RoundedCornerShape(20.dp)
 private val PillShape = RoundedCornerShape(50)
@@ -365,53 +371,80 @@ fun ColumnScope.AskingContent(asking: FamilySignInPending, sending: Boolean, all
 }
 
 // Changing a family member's password: the current one, the new one twice
-// with how strong it looks. It signs every other app and device out.
+// with how strong it looks. It signs every other app and device out. The
+// change runs on its own (`change`, which answers false when one was already
+// on its way and nothing was sent): while one is on its way (`changing`, from
+// here or another page) Done sends nothing and the sheet stays. Once changed
+// the sheet closes and the app's notice says so; a refusal shows here, or in
+// the notice once the sheet is gone.
 @Composable
-fun ColumnScope.PasswordSheetContent(change: suspend (String, String) -> PasswordChange, done: (String) -> Unit, close: () -> Unit) {
+fun ColumnScope.PasswordSheetContent(
+    changing: StateFlow<Boolean>,
+    change: suspend (String, String, (PasswordChange, String) -> Boolean) -> Boolean,
+    close: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
+    val drawn = rememberStillDrawn()
     var draft by remember { mutableStateOf(PasswordDraft()) }
-    var busy by remember { mutableStateOf(false) }
+    val busy by changing.collectAsStateWithLifecycle()
     var problem by remember { mutableStateOf<String?>(null) }
+    val leave = { if (!changing.value) close() }
     fun go() {
+        if (changing.value) return
         passwordDraftProblem(draft)?.let { problem = it; return }
-        busy = true
         problem = null
-        scope.launch {
-            val result = change(draft.current, draft.new)
-            busy = false
-            if (result == PasswordChange.Changed) done(passwordChangeWords(result, family = true)) else problem = passwordChangeWords(result, family = true)
+        val sent = draft
+        // Started at once, so a second Done in the same frame finds this one.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            change(sent.current, sent.new) answer@{ result, words ->
+                if (!drawn()) return@answer false
+                if (result == PasswordChange.Changed) close() else problem = words
+                true
+            }
         }
     }
-    Header("", CHANGE_PASSWORD, SIGN_OUT_EVERYWHERE_LINE, OctoColors.TextMuted, clock = false, close = close, avatar = false)
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Header("", CHANGE_PASSWORD, SIGN_OUT_EVERYWHERE_LINE, OctoColors.TextMuted, clock = false, close = leave, avatar = false)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PasswordField(draft.current, "Current password") { draft = draft.copy(current = it); problem = null }
-        PasswordField(draft.new, "New password, at least $MIN_PASSWORD characters") { draft = draft.copy(new = it); problem = null }
+        PasswordField(draft.new, "New password", placeholder = "At least $MIN_PASSWORD characters") { draft = draft.copy(new = it); problem = null }
         passwordStrength(draft.new)?.let { Text(it, style = OctoType.caption, color = OctoColors.TextMuted) }
         PasswordField(draft.confirm, "New password again", last = true, onDone = ::go) { draft = draft.copy(confirm = it); problem = null }
         problem?.let { Text(it, style = OctoType.caption, color = OctoColors.Error) }
     }
     Hairline()
+    // The main answer first and Cancel second, as every question in the app sets them.
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        GlazeButton("Cancel", close, size = ButtonSize.Medium, enabled = !busy, modifier = Modifier.weight(1f))
         AccentButton(CHANGE_PASSWORD, onClick = ::go, size = ButtonSize.Medium, fill = OctoColors.Accent, loading = busy, modifier = Modifier.weight(1f))
+        GlazeButton("Cancel", leave, size = ButtonSize.Medium, enabled = !busy, modifier = Modifier.weight(1f))
     }
 }
 
+// A password field with its name over it, so a typed field keeps its name.
 @Composable
-private fun PasswordField(value: String, placeholder: String, last: Boolean = false, onDone: () -> Unit = {}, onChange: (String) -> Unit) {
-    GlassInput(
-        value = value,
-        onValueChange = onChange,
-        placeholder = placeholder,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = if (last) ImeAction.Done else ImeAction.Next),
-        keyboardActions = KeyboardActions(onDone = { onDone() }),
-        visualTransformation = PasswordVisualTransformation(),
-        contentType = ContentType.NewPassword,
-    )
+private fun PasswordField(
+    value: String,
+    name: String,
+    placeholder: String = SignInWords.REQUIRED,
+    last: Boolean = false,
+    onDone: () -> Unit = {},
+    onChange: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(name, style = OctoType.formName, color = OctoColors.TextPrimary)
+        GlassInput(
+            value = value,
+            onValueChange = onChange,
+            placeholder = placeholder,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = if (last) ImeAction.Done else ImeAction.Next),
+            keyboardActions = KeyboardActions(onDone = { onDone() }),
+            visualTransformation = PasswordVisualTransformation(),
+            contentType = ContentType.NewPassword,
+        )
+    }
 }
 
 // Your login: the server's addresses (the outside one and, when it differs,
@@ -578,7 +611,7 @@ private fun Header(name: String, title: String, subtitle: String, subtitleColor:
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
-        if (avatar) Box(Modifier.size(40.dp).background(OctoColors.AccentSelected, CircleShape).border(1.dp, Color.White.copy(alpha = 0.10f), CircleShape), contentAlignment = Alignment.Center) {
+        if (avatar) Box(Modifier.size(40.dp).background(OctoColors.AccentSelected, CircleShape).border(1.dp, OctoInk.Quaternary, CircleShape), contentAlignment = Alignment.Center) {
             Text(initial, style = OctoType.body.copy(fontWeight = FontWeight.Bold), color = OctoColors.TextPrimary)
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
@@ -640,7 +673,7 @@ fun ReachChooser(question: String, reach: LinkReach, options: LinkOptions, owner
 private fun ReachOption(reach: LinkReach, icon: Int, chosen: Boolean, locked: Boolean, modifier: Modifier, onPick: () -> Unit) {
     val motion = motionScale()
     val fill by animateColorAsState(if (chosen) OctoColors.Accent else Color.Transparent, octoTween(motion, OctoDuration.Fill), label = "reach fill")
-    val ink by animateColorAsState(if (chosen) OnAccent else OctoColors.TextSecondary, octoTween(motion, OctoDuration.Fill), label = "reach ink")
+    val ink by animateColorAsState(if (chosen) OctoColors.OnAccent else OctoColors.TextSecondary, octoTween(motion, OctoDuration.Fill), label = "reach ink")
     val shape = RoundedCornerShape(14.dp)
     Box(
         modifier
@@ -675,9 +708,6 @@ private fun ReachOption(reach: LinkReach, icon: Int, chosen: Boolean, locked: Bo
 
 private val ChoiceType = OctoType.body.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
 
-// Words on the accent fill.
-private val OnAccent = Color(0xFF0C0C0D)
-
 @Composable
 private fun QrWell(link: String, label: String, side: Dp, dim: Boolean, overlay: @Composable () -> Unit = {}) {
     val motion = motionScale()
@@ -691,7 +721,7 @@ private fun QrWell(link: String, label: String, side: Dp, dim: Boolean, overlay:
 
 // The QR code on white, with a generous quiet edge.
 @Composable
-private fun QrTile(text: String, label: String, side: Dp, modifier: Modifier) {
+internal fun QrTile(text: String, label: String, side: Dp, modifier: Modifier) {
     val code = remember(text) { qrCode(text) }
     val quiet = side / 13
     Box(modifier.size(side).background(Color.White, RoundedCornerShape(14.dp)).padding(quiet).semantics { contentDescription = label }) {
@@ -820,7 +850,7 @@ private fun SkeletonBlock(width: Dp, height: Dp, corner: Dp, modifier: Modifier 
         modifier
             .then(if (width == Dp.Unspecified) Modifier.fillMaxWidth() else Modifier.width(width))
             .height(height)
-            .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(corner)),
+            .background(OctoColors.TextPrimary.copy(alpha = 0.06f), RoundedCornerShape(corner)),
     )
 }
 

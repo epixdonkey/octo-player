@@ -197,9 +197,9 @@ public enum AmbientStrength: String, StoredChoice, Codable {
 
     public var detail: String {
         switch self {
-        case .off: "The plain dark background everywhere."
+        case .off: "The plain background everywhere."
         case .subtle: "A faint glow of the artwork's colors behind the pages."
-        case .rich: "A fuller glow, still kept dark enough for text."
+        case .rich: "A fuller glow, still kept soft enough for text."
         }
     }
 
@@ -397,8 +397,9 @@ extension StreamQuality: StoredChoice {
     /// As the settings show it: "Original" or "320 kbps".
     public var label: String { kbps.map { "\($0) kbps" } ?? "Original" }
 
-    /// As the download quality shows it: "Original" or "320 kbps MP3".
-    public var downloadLabel: String { kbps.map { "\($0) kbps MP3" } ?? "Original" }
+    /// As the download quality shows it, in the format smaller downloads are made as: "Original" or
+    /// "320 kbps Opus".
+    public func downloadLabel(_ format: DownloadFormat) -> String { kbps.map { "\($0) kbps \(format.label)" } ?? "Original" }
 
     /// Original, as the pickers say it.
     public static let originalLabel = "Original (as the file is, FLAC stays FLAC)"
@@ -504,6 +505,8 @@ public struct OfflinePrefs: Sendable, Equatable, Codable {
     public var prefetchWifi = 3
     public var prefetchMobile = 1
     public var downloadQuality: StreamQuality = .original
+    /// The type smaller downloads are made as. Opus for everyone who never chose, older backups included.
+    public var downloadFormat: DownloadFormat = .opus
     public var wifiOnly = true
     /// Stream on Wi-Fi even when a downloaded copy is on the phone.
     public var streamOnWifi = false
@@ -514,7 +517,7 @@ public struct OfflinePrefs: Sendable, Equatable, Codable {
     public init() {}
 
     enum CodingKeys: String, CodingKey {
-        case cacheSize, prefetchWifi, prefetchMobile, downloadQuality, wifiOnly, streamOnWifi, keepLiked, keptPlaylists
+        case cacheSize, prefetchWifi, prefetchMobile, downloadQuality, downloadFormat, wifiOnly, streamOnWifi, keepLiked, keptPlaylists
     }
 
     public init(from decoder: Decoder) throws {
@@ -523,6 +526,7 @@ public struct OfflinePrefs: Sendable, Equatable, Codable {
         prefetchWifi = c.value(.prefetchWifi, or: 3)
         prefetchMobile = c.value(.prefetchMobile, or: 1)
         downloadQuality = c.choice(.downloadQuality, or: .original)
+        downloadFormat = c.choice(.downloadFormat, or: .opus)
         wifiOnly = c.value(.wifiOnly, or: true)
         streamOnWifi = c.value(.streamOnWifi, or: false)
         keepLiked = c.value(.keepLiked, or: false)
@@ -535,6 +539,7 @@ public struct OfflinePrefs: Sendable, Equatable, Codable {
         try c.encode(prefetchWifi, forKey: .prefetchWifi)
         try c.encode(prefetchMobile, forKey: .prefetchMobile)
         try c.encode(downloadQuality.storedName, forKey: .downloadQuality)
+        try c.encode(downloadFormat.storedName, forKey: .downloadFormat)
         try c.encode(wifiOnly, forKey: .wifiOnly)
         try c.encode(streamOnWifi, forKey: .streamOnWifi)
         try c.encode(keepLiked, forKey: .keepLiked)
@@ -546,18 +551,22 @@ public struct OfflinePrefs: Sendable, Equatable, Codable {
 
 /// How the player looks and plays. The defaults are what a new install gets.
 public struct PlayerPrefs: Sendable, Equatable, Codable {
-    /// The range the longest blend can be set to.
-    public static let crossfadeSecondsRange = 2...16
+    /// The range Crossfade's length can be set to.
+    public static let crossfadeSecondsRange = shortestCrossfadeSeconds...longestCrossfadeSeconds
 
     public var liveBackground = true
     public var background = BackgroundPrefs()
-    public var crossfade = false
-    public var crossfadeSeconds = 8
-    /// The curve of the crossfade while smart transitions are off.
+    /// What plays between two songs, and whether that choice is stored: a device that never chose
+    /// shows Automix without storing it. A backup writes these itself.
+    public var betweenSongs: BetweenSongs = .automix
+    public var betweenSongsStored = false
+    /// Crossfade's length in seconds and its curve. Automix picks its own lengths and curves.
+    public var crossfadeSeconds = defaultCrossfadeSeconds
     public var crossfadeCurve: FadeCurve = .equalPower
-    public var smartTransitions = true
+    /// Automix's own two: filter sweeps thin the songs out as they cross, and matching the tempo
+    /// nudges the next song's speed.
     public var filterSweeps = true
-    public var matchTempo = false
+    public var matchTempo = true
     public var lyricsOnline = true
     public var speed: Float = 1
     public var keepPitch = true
@@ -584,11 +593,35 @@ public struct PlayerPrefs: Sendable, Equatable, Codable {
     public var glassTint = false
     /// How an album's animated art shows.
     public var animatedArt: AnimatedArtSetting = .standard
+    /// The theme shown while Match the system is off.
+    public var theme: ThemeChoice = .octo
+    /// The light and dark themes Match the system uses.
+    public var themeLight: ThemeChoice = .daylight
+    public var themeDark: ThemeChoice = .octo
+    /// Whether the theme follows the phone's light or dark mode.
+    public var themeMatch = false
 
     public init() {}
 
+    /// The four theme fields together.
+    public var themes: ThemeSettings {
+        get { ThemeSettings(theme: theme, light: themeLight, dark: themeDark, match: themeMatch) }
+        set {
+            theme = newValue.theme
+            themeLight = newValue.light
+            themeDark = newValue.dark
+            themeMatch = newValue.match
+        }
+    }
+
     /// The longest blend the player uses, or 0 for none.
-    public var crossfadeMs: Int { crossfade ? crossfadeSeconds * 1_000 : 0 }
+    public var crossfadeMs: Int { crossfadeMsOf(betweenSongs, crossfadeSeconds: crossfadeSeconds) }
+
+    /// How the player plans the blends.
+    public var automix: AutomixSettings {
+        automixSettingsOf(betweenSongs, crossfadeSeconds: crossfadeSeconds, crossfadeCurve: crossfadeCurve, filterSweeps: filterSweeps,
+                          matchTempo: matchTempo)
+    }
 
     /// The speed and pitch the player is set to.
     public var pace: Pace { Pace.of(speed: speed, keepPitch: keepPitch, semitones: pitchSemitones) }
@@ -601,7 +634,7 @@ public struct PlayerPrefs: Sendable, Equatable, Codable {
         RadioTuning(discovery: radioDiscovery, adventure: radioAdventure, variety: radioVariety, favorites: radioFavorites)
     }
 
-    /// Held to the ranges the settings offer: the blend length, the speed's steps, the pitch and
+    /// Held to the ranges the settings offer: Crossfade's length, the speed's steps, the pitch and
     /// the background's values.
     public func sane() -> PlayerPrefs {
         var held = self
@@ -609,14 +642,17 @@ public struct PlayerPrefs: Sendable, Equatable, Codable {
         held.crossfadeSeconds = crossfadeSeconds.clamped(to: Self.crossfadeSecondsRange)
         held.speed = Pace.snapSpeed(speed)
         held.pitchSemitones = pitchSemitones.clamped(to: -Pace.pitchRangeSemitones...Pace.pitchRangeSemitones)
+        held.themes = themeSettings(theme.storedName, themeLight.storedName, themeDark.storedName, themeMatch)
         return held
     }
 
+    /// The fields as a backup names them. The Between songs choice is read from the backup's own
+    /// fields as a whole (`PlayerBackup`), never from here.
     enum CodingKeys: String, CodingKey {
-        case liveBackground, background, crossfade, crossfadeSeconds, crossfadeCurve, smartTransitions, filterSweeps, matchTempo, lyricsOnline,
+        case liveBackground, background, crossfadeSeconds, crossfadeCurve, filterSweeps, matchTempo, lyricsOnline,
              speed, keepPitch, pitchSemitones, skipSilence, autoplay, radioDiscovery, radioAdventure, radioVariety, radioFavorites,
              resumeWired, resumeBluetooth, resumeAlways, ambient, reduceMotion, castRenderers, castKeepPlaying, libraryOnly, swipeAction, accent, glassTint,
-             animatedArt
+             animatedArt, theme, themeLight, themeDark, themeMatch
     }
 
     public init(from decoder: Decoder) throws {
@@ -624,10 +660,8 @@ public struct PlayerPrefs: Sendable, Equatable, Codable {
         let d = PlayerPrefs()
         liveBackground = c.value(.liveBackground, or: d.liveBackground)
         background = c.value(.background, or: d.background)
-        crossfade = c.value(.crossfade, or: d.crossfade)
         crossfadeSeconds = c.value(.crossfadeSeconds, or: d.crossfadeSeconds)
         crossfadeCurve = c.choice(.crossfadeCurve, or: d.crossfadeCurve)
-        smartTransitions = c.value(.smartTransitions, or: d.smartTransitions)
         filterSweeps = c.value(.filterSweeps, or: d.filterSweeps)
         matchTempo = c.value(.matchTempo, or: d.matchTempo)
         lyricsOnline = c.value(.lyricsOnline, or: d.lyricsOnline)
@@ -652,6 +686,8 @@ public struct PlayerPrefs: Sendable, Equatable, Codable {
         accent = c.choice(.accent, or: d.accent)
         glassTint = c.value(.glassTint, or: d.glassTint)
         animatedArt = c.choice(.animatedArt, or: d.animatedArt)
+        func name(_ key: CodingKeys) -> String? { (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil }
+        themes = themeSettings(name(.theme), name(.themeLight), name(.themeDark), c.value(.themeMatch, or: d.themeMatch))
     }
 }
 

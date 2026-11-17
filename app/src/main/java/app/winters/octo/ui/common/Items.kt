@@ -59,6 +59,8 @@ import app.winters.octo.design.NowPlayingBars
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
+import app.winters.octo.design.OverArt
+import app.winters.octo.design.SelectedFill
 import app.winters.octo.design.SelectedRow
 import app.winters.octo.design.rememberPressSqueeze
 import app.winters.octo.discovery.OnlineAlbum
@@ -80,6 +82,14 @@ private val RowShape = RoundedCornerShape(12.dp)
 // picked row's pill closer still, so lists run near the edges.
 val ListRowSide = 12.dp
 val ListRowPickInset = 4.dp
+
+// A song row's geometry: at least this tall, its cover this big with these
+// corners, a number lead this wide, and this far between its parts.
+val SongRowMinHeight = 56.dp
+val SongRowCover = 44.dp
+val SongRowCoverCorner = 6.dp
+val SongRowNumberWidth = 28.dp
+val SongRowGap = 12.dp
 
 // Opens the menu on a long press, with a little buzz, floating beside
 // what was held. Held down, it gives a little and springs back.
@@ -170,10 +180,11 @@ private fun AlbumCard(
 @Composable
 fun SongCard(track: TrackEntity, onClick: () -> Unit) {
     val menu = LocalSongMenu.current
+    val faint = isOutOfReach(track)
     Column(
         Modifier
             .width(150.dp)
-            .alpha(if (LocalOfflineMarks.current.isOutOfReach(track)) OutOfReachAlpha else 1f)
+            .alpha(if (faint) OutOfReachAlpha else 1f)
             .pressOrHold(LocalHapticFeedback.current, LocalPressSpot.current, onClick) { menu.open(track.id) },
     ) {
         ArtworkFill(track.artwork, outside = isOutsideLibrary(track.id))
@@ -331,6 +342,7 @@ private fun SongLine(
     val picked = selection?.isPicked(selectKey) == true
     val interaction = remember { MutableInteractionSource() }
     val squeeze by rememberPressSqueeze(interaction)
+    val faint = isOutOfReach(song)
     Box(
         Modifier.graphicsLayer {
             // Held down, the row gives a little and springs back.
@@ -372,14 +384,14 @@ private fun SongLine(
                     )
                 }
                 // At least a row tall; taller when large text needs it.
-                .heightIn(min = 56.dp)
+                .heightIn(min = SongRowMinHeight)
                 .padding(horizontal = ListRowSide, vertical = 4.dp)
                 // With no connection, a song that cannot play is drawn faint.
-                .alpha(if (LocalOfflineMarks.current.isOutOfReach(song)) OutOfReachAlpha else 1f),
+                .alpha(if (faint) OutOfReachAlpha else 1f),
             contentAlignment = Alignment.CenterStart,
         ) {
             if (swap == null) {
-                face(song)
+                SelectedFill(picked) { face(song) }
             } else {
                 // The find and its check hold still; only the turn into the
                 // library song fades.
@@ -388,7 +400,7 @@ private fun SongLine(
                     transitionSpec = { fadeIn(tween(swap.fadeMs)) togetherWith fadeOut(tween(swap.fadeMs)) using null },
                     label = "find to library song",
                     contentKey = { it.id },
-                ) { shown -> face(shown) }
+                ) { shown -> SelectedFill(picked) { face(shown) } }
             }
         }
     }
@@ -409,7 +421,7 @@ private fun SongFace(
     ownership: Boolean = false,
     highlight: Boolean = false,
 ) {
-    val sign = rowAddSign(track.id, LocalAdoptedFinds.current, offerAdd)
+    val sign = rowAddSign(track.id, LocalAdoptedFinds.current, offerAdd, LocalOwnedFinds.current)
     val end: (@Composable () -> Unit)? = when (rowEnd(sign, librarySpace, hasTrailing = trailing != null)) {
         RowEnd.AddButton -> ({ AddToLibraryButton(track, size = AddButtonSize, iconSize = AddIconSize) })
         RowEnd.AddSpace -> ({ Spacer(Modifier.width(AddButtonSize)) })
@@ -420,11 +432,11 @@ private fun SongFace(
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(SongRowGap),
     ) {
         val artwork: @Composable () -> Unit = {
             Box(contentAlignment = Alignment.Center) {
-                Artwork(track.artwork, 44.dp, shape = RoundedCornerShape(6.dp), outside = sign == AddSign.Mark)
+                Artwork(track.artwork, SongRowCover, shape = RoundedCornerShape(SongRowCoverCorner), outside = sign == AddSign.Mark)
                 when {
                     picked -> LeadMark { PickedMark() }
                     isNow -> LeadMark { NowPlayingBars(playing, Modifier.size(16.dp)) }
@@ -443,7 +455,7 @@ private fun SongFace(
                 )
                 artwork()
             }
-            is SongLead.Number -> Box(Modifier.width(28.dp), contentAlignment = Alignment.CenterEnd) {
+            is SongLead.Number -> Box(Modifier.width(SongRowNumberWidth), contentAlignment = Alignment.CenterEnd) {
                 when {
                     picked -> PickedMark()
                     isNow -> NowPlayingBars(playing, Modifier.size(14.dp))
@@ -469,7 +481,7 @@ private fun SongFace(
                         Icon(
                             painterResource(OctoIcons.StarFilled),
                             contentDescription = "Most popular",
-                            tint = OctoColors.Accent,
+                            tint = OctoColors.Star,
                             modifier = Modifier.padding(end = 6.dp).size(14.dp),
                         )
                     }
@@ -496,7 +508,7 @@ private val LeadShade = Color.Black.copy(alpha = 0.5f)
 
 @Composable
 private fun LeadMark(mark: @Composable () -> Unit) {
-    Box(Modifier.size(44.dp).background(LeadShade, RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) { mark() }
+    Box(Modifier.size(SongRowCover).background(LeadShade, RoundedCornerShape(SongRowCoverCorner)), contentAlignment = Alignment.Center) { OverArt { mark() } }
 }
 
 @Composable

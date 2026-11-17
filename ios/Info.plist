@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>Octo</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>1.13.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>UILaunchScreen</key>
@@ -19,8 +19,6 @@
         <key>UIImageRespectsSafeAreaInsets</key>
         <false/>
     </dict>
-    <key>UIUserInterfaceStyle</key>
-    <string>Dark</string>
     <key>UIBackgroundModes</key>
     <array>
         <string>audio</string>
@@ -29,6 +27,7 @@
     <key>BGTaskSchedulerPermittedIdentifiers</key>
     <array>
         <string>app.winters.octo.family-notices</string>
+        <string>app.winters.octo.copy.*</string>
     </array>
     <key>NSCameraUsageDescription</key>
     <string>Octo uses the camera to scan a family QR code.</string>

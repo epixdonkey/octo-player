@@ -1,6 +1,11 @@
 * text=auto
 gradlew text eol=lf
 *.sh text eol=lf
+*.patch text eol=lf
+# Linux package files run or read on Linux, also from a Windows checkout.
+desktop/packaging/linux/appimage/AppRun text eol=lf
+desktop/packaging/linux/flatpak/octo-launcher text eol=lf
+desktop/packaging/linux/pacman/PKGBUILD.in text eol=lf
 *.bat text eol=crlf
 *.jar binary
 *.png binary
@@ -8,3 +13,8 @@ gradlew text eol=lf
 
 # Signed test fixtures: their bytes are what was signed.
 shared/core/src/commonTest/resources/update/** -text
+# The iPhone store assets: their bytes are what the Mac tools wrote and the hashes name.
+ios/Resources/StoreAssets/** -text
+
+# Certificates made with openssl: every checkout writes them with LF, as they were made.
+fixtures/certificate-pins/*.pem text eol=lf

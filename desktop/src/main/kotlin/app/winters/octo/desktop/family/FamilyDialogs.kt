@@ -76,6 +76,7 @@ import app.winters.octo.design.DesktopType
 import app.winters.octo.design.GlazeCapsule
 import app.winters.octo.design.Glyph
 import app.winters.octo.design.IconAction
+import app.winters.octo.design.IconSize
 import app.winters.octo.design.LocalTabStops
 import app.winters.octo.design.MonoFontFamily
 import app.winters.octo.design.OctoColors
@@ -93,6 +94,7 @@ import app.winters.octo.desktop.AppState
 import app.winters.octo.desktop.pages.openJoinLink
 import app.winters.octo.desktop.system.openInBrowser
 import app.winters.octo.desktop.ui.LocalWindowShown
+import app.winters.octo.connection.GatewayWords
 import app.winters.octo.subsonic.FamilyRole
 import app.winters.octo.ui.family.ASK_OWNER_OUTSIDE
 import app.winters.octo.ui.family.COPIED
@@ -169,6 +171,7 @@ private fun ColumnScope.InvitePopup(app: AppState, model: FamilyModel, invite: (
             owner = model.me?.role == FamilyRole.Owner,
         ),
         copy = ::copyText,
+        signInPage = app.connection?.behindSignInPage == true,
     )
 }
 
@@ -323,7 +326,7 @@ private fun HandOverBody(sheet: HandOverSheet, options: LinkOptions, reach: Link
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(5.dp),
                             ) {
-                                Glyph(OctoIcons.Check, size = 13.dp)
+                                Glyph(OctoIcons.Check, size = IconSize.Mark)
                                 Txt(NEW_CODE, DesktopType.label, OctoColors.TextPrimary)
                             }
                         } else {
@@ -368,7 +371,7 @@ private fun Finished(words: String) {
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box(Modifier.size(32.dp).background(OctoColors.SignalGreen.copy(alpha = 0.18f), CircleShape), contentAlignment = Alignment.Center) {
-            Glyph(OctoIcons.Check, size = 18.dp, tint = OctoColors.SignalGreen)
+            Glyph(OctoIcons.Check, size = IconSize.Toolbar, tint = OctoColors.SignalGreen)
         }
         Txt(words, DesktopType.body, OctoColors.TextPrimary, Modifier.weight(1f), maxLines = 3)
     }
@@ -386,7 +389,7 @@ fun ColumnScope.AskingCard(asking: FamilySignInPending, sending: Boolean, allow:
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Box(Modifier.size(56.dp).background(OctoColors.AccentSelected, CircleShape), contentAlignment = Alignment.Center) {
-            Glyph(OctoIcons.Device, size = 28.dp)
+            Glyph(OctoIcons.Device, size = IconSize.Feature)
         }
         Txt("Sign in on", DesktopType.meta, OctoColors.TextMuted)
         Txt(asking.deviceName.ifBlank { "A new device" }, OctoType.title, OctoColors.TextPrimary, maxLines = 2, align = TextAlign.Center)
@@ -448,11 +451,8 @@ private val PillShape = RoundedCornerShape(50)
 private val ChoiceShape = RoundedCornerShape(12.dp)
 private val ChoiceType = DesktopType.emphasis.copy(fontSize = 15.sp)
 
-// Words on the accent fill.
-private val OnAccent = Color(0xFF0C0C0D)
-
 @Composable
-fun ColumnScope.InviteCard(invite: InviteSheet, server: String, newLink: () -> Unit, actions: SheetActions, copy: (String) -> Unit) {
+fun ColumnScope.InviteCard(invite: InviteSheet, server: String, newLink: () -> Unit, actions: SheetActions, copy: (String) -> Unit, signInPage: Boolean = false) {
     val focus = remember { FocusRequester() }
     FocusOnDone(focus)
     val options = invite.options
@@ -484,6 +484,9 @@ fun ColumnScope.InviteCard(invite: InviteSheet, server: String, newLink: () -> U
                 Label("Then")
                 Txt(inviteNext(invite.name), DesktopType.body, OctoColors.TextPrimary, Modifier.bringIntoViewRequester(target), maxLines = 3)
                 invite.error?.let { Txt(it, DesktopType.meta, OctoColors.SignalOrange, maxLines = 2) }
+                // A sign-in page in front of the server asks the new member
+                // for an account there first.
+                if (signInPage) Txt(GatewayWords.SHARE_LINE, DesktopType.meta, OctoColors.TextMuted, maxLines = 3)
             },
         )
     }
@@ -524,7 +527,7 @@ private fun MoreBelow(scroll: ScrollState, target: BringIntoViewRequester, modif
     val motion = motionScale()
     AnimatedVisibility(scroll.canScrollForward, modifier, enter = fadeIn(octoTween(motion, OctoDuration.Card)), exit = fadeOut(octoTween(motion, OctoDuration.Card))) {
         Box(
-            Modifier.fillMaxWidth().height(56.dp).background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF0141416)))),
+            Modifier.fillMaxWidth().height(56.dp).background(Brush.verticalGradient(listOf(Color.Transparent, OctoColors.Background.copy(alpha = 0.94f)))),
             contentAlignment = Alignment.BottomCenter,
         ) {
             Row(
@@ -545,7 +548,7 @@ private fun MoreBelow(scroll: ScrollState, target: BringIntoViewRequester, modif
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Txt(MORE_BELOW, DesktopType.label, OctoColors.TextPrimary)
-                Glyph(OctoIcons.Collapse, size = 14.dp)
+                Glyph(OctoIcons.Collapse, size = IconSize.Inline)
             }
         }
     }
@@ -562,7 +565,7 @@ private fun Header(name: String, title: String, subtitle: String, subtitleColor:
     ) {
         val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
         Box(
-            Modifier.size(42.dp).background(OctoColors.AccentSelected, CircleShape).border(1.dp, Color.White.copy(alpha = 0.10f), CircleShape),
+            Modifier.size(42.dp).background(OctoColors.AccentSelected, CircleShape).border(1.dp, OctoColors.TextPrimary.copy(alpha = 0.10f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Txt(initial, OctoType.section, OctoColors.TextPrimary)
@@ -570,13 +573,13 @@ private fun Header(name: String, title: String, subtitle: String, subtitleColor:
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Txt(title, OctoType.headline, OctoColors.TextPrimary, maxLines = 2)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (clock) Glyph(OctoIcons.Timer, size = 14.dp, tint = subtitleColor)
+                if (clock) Glyph(OctoIcons.Timer, size = IconSize.Inline, tint = subtitleColor)
                 Txt(subtitle, DesktopType.meta, subtitleColor, maxLines = 2)
             }
         }
         // Escape closes it too, so the keyboard skips this.
         CompositionLocalProvider(LocalTabStops provides false) {
-            IconAction(OctoIcons.Close, "Close", close, size = 32.dp, iconSize = 18.dp)
+            IconAction(OctoIcons.Close, "Close", close, size = 32.dp, iconSize = IconSize.Toolbar)
         }
     }
 }
@@ -612,7 +615,7 @@ private fun ReachChooser(question: String, reach: LinkReach, options: LinkOption
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Glyph(OctoIcons.Lock, size = 18.dp, tint = OctoColors.TextSecondary)
+                Glyph(OctoIcons.Lock, size = IconSize.Toolbar, tint = OctoColors.TextSecondary)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Txt(SET_OUTSIDE_FIRST, DesktopType.emphasis, OctoColors.TextPrimary, maxLines = 2)
                     if (!actions.owner) Txt(ASK_OWNER_OUTSIDE, DesktopType.meta, OctoColors.TextMuted, maxLines = 2)
@@ -629,7 +632,7 @@ private fun ReachChooser(question: String, reach: LinkReach, options: LinkOption
 private fun ReachOption(reach: LinkReach, icon: androidx.compose.ui.graphics.vector.ImageVector, chosen: Boolean, locked: Boolean, modifier: Modifier, onPick: () -> Unit) {
     val motion = motionScale()
     val fill by animateColorAsState(if (chosen) OctoColors.Accent else Color.Transparent, octoTween(motion, OctoDuration.Fill), label = "reach fill")
-    val ink by animateColorAsState(if (chosen) OnAccent else OctoColors.TextSecondary, octoTween(motion, OctoDuration.Fill), label = "reach ink")
+    val ink by animateColorAsState(if (chosen) OctoColors.OnAccent else OctoColors.TextSecondary, octoTween(motion, OctoDuration.Fill), label = "reach ink")
     Box(
         modifier
             .heightIn(min = 48.dp)
@@ -646,7 +649,7 @@ private fun ReachOption(reach: LinkReach, icon: androidx.compose.ui.graphics.vec
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         ) {
-            Glyph(if (locked && !chosen) OctoIcons.Lock else icon, size = 18.dp, tint = ink)
+            Glyph(if (locked && !chosen) OctoIcons.Lock else icon, size = IconSize.Toolbar, tint = ink)
             // 15 sp, smaller only when there is no room, so the word is never cut.
             BasicText(
                 reach.label,
@@ -657,7 +660,7 @@ private fun ReachOption(reach: LinkReach, icon: androidx.compose.ui.graphics.vec
             )
         }
         // The check sits in the corner, taking no room from the word.
-        if (chosen) Glyph(OctoIcons.Check, Modifier.align(Alignment.TopEnd).padding(6.dp), size = 12.dp, tint = ink)
+        if (chosen) Glyph(OctoIcons.Check, Modifier.align(Alignment.TopEnd).padding(6.dp), size = 12.dp, tint = ink, exact = true)
     }
 }
 
@@ -715,7 +718,7 @@ internal fun LinkRow(url: String, copyName: String, copy: (String) -> Unit, open
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Glyph(OctoIcons.Link, size = 16.dp, tint = OctoColors.AccentHover)
+        Glyph(OctoIcons.Link, size = IconSize.Table, tint = OctoColors.AccentHover)
         OctoTooltip(url, Modifier.weight(1f)) {
             Txt(
                 shownLink(url, 52),
@@ -774,8 +777,8 @@ internal fun CopyButton(value: String, name: String, copy: (String) -> Unit) {
                 copied = true
             },
             size = 34.dp,
-            iconSize = 18.dp,
-            tint = if (copied) OctoColors.SignalGreen else Color.White,
+            iconSize = IconSize.Toolbar,
+            tint = if (copied) OctoColors.SignalGreen else OctoColors.TextPrimary,
         )
     }
 }
@@ -787,7 +790,7 @@ internal fun Problem(error: String, retry: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Glyph(OctoIcons.Info, size = 20.dp, tint = OctoColors.SignalOrange)
+        Glyph(OctoIcons.Info, size = IconSize.Transport, tint = OctoColors.SignalOrange)
         Txt(error, DesktopType.body, OctoColors.TextPrimary, Modifier.weight(1f), maxLines = 2)
         GlazeCapsule(null, TRY_AGAIN, retry, height = 36.dp)
     }
@@ -799,7 +802,7 @@ internal fun SkeletonBlock(width: Dp, height: Dp, corner: Dp, modifier: Modifier
         modifier
             .then(if (width == Dp.Unspecified) Modifier.fillMaxWidth() else Modifier.width(width))
             .height(height)
-            .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(corner)),
+            .background(OctoColors.TextPrimary.copy(alpha = 0.06f), RoundedCornerShape(corner)),
     )
 }
 
@@ -815,7 +818,7 @@ private fun LinkAction(text: String, icon: androidx.compose.ui.graphics.vector.I
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Glyph(icon, size = 16.dp, tint = OctoColors.AccentHover)
+        Glyph(icon, size = IconSize.Table, tint = OctoColors.AccentHover)
         Txt(text, OctoType.label, OctoColors.AccentHover, maxLines = 2)
     }
 }

@@ -93,6 +93,8 @@ fn context_of(o: &Value) -> TransitionContext {
         next_genre: text_or_none(o, "nextGenre"),
         body_level_db: num_or_none(o, "bodyLevelDb"),
         tempo_prior: num_or_none(o, "tempoPrior"),
+        lock_at_pace: o.get("lockAtPace").and_then(Value::as_bool).unwrap_or(false),
+        incoming_gain_db: num(o, "incomingGainDb"),
     }
 }
 
@@ -132,14 +134,15 @@ impl Checker {
     }
 }
 
-// Analyzes one section the way the file describes.
+// Analyzes one section the way the file describes: a head measured against
+// the whole song's body when the section gives one.
 fn analyze(song: &SyntheticSong, section: &Value) -> SectionAnalysis {
     let envelope = song.envelope(num(section, "fromMs"), num(section, "toMs"), 4_093);
     let tag = num_or_none(section, "tagBpm");
     if text(section, "part") == "tail" {
         analyze_tail(envelope, tag, None)
     } else {
-        analyze_head(envelope, tag)
+        analyze_head(envelope, tag, num_or_none(section, "bodyLevelDb"))
     }
 }
 
@@ -176,16 +179,25 @@ fn check(vectors: &Value) -> Vec<String> {
     });
 
     let mut untagged: HashMap<String, &SectionAnalysis> = HashMap::new();
+    // Heads measured against a whole song's body, by song and body level.
+    let mut against_body: Vec<(&str, f64, &SectionAnalysis)> = Vec::new();
     for (section, analysis) in sections.iter().zip(&analyses) {
         let name = text(section, "song");
         let part = text(section, "part");
         let tag = num_or_none(section, "tagBpm");
-        let what = match tag {
-            None => format!("{name} {part}"),
-            Some(tag) => format!("{name} {part} tagged {tag}"),
+        let body = num_or_none(section, "bodyLevelDb");
+        let what = match (tag, body) {
+            (None, None) => format!("{name} {part}"),
+            (Some(tag), _) => format!("{name} {part} tagged {tag}"),
+            (None, Some(body)) => format!("{name} {part} against a body of {body}"),
         };
-        if tag.is_none() {
+        // The planner takes each song's plain section, or a head against
+        // the whole song's body when a case names one.
+        if tag.is_none() && body.is_none() {
             untagged.insert(format!("{name}/{part}"), analysis);
+        }
+        if let (None, Some(body), "head") = (tag, body, part) {
+            against_body.push((name, body, analysis));
         }
         let envelope = &analysis.envelope;
         if envelope.size() as i64 != int(section, "hops") {
@@ -301,7 +313,14 @@ fn check(vectors: &Value) -> Vec<String> {
         let settings = &case["settings"];
         let next = fade_song_of(&case["next"]);
         let tail = (!flag(case, "tailMissing")).then(|| untagged[&format!("{}/tail", text(case, "a"))]);
-        let head = (!flag(case, "headMissing")).then(|| untagged[&format!("{}/head", text(case, "b"))]);
+        let b = text(case, "b");
+        let head = match (flag(case, "headMissing"), num_or_none(case, "headBodyLevelDb")) {
+            (true, _) => None,
+            (false, Some(body)) => {
+                against_body.iter().find(|(n, d, _)| *n == b && *d == body).map(|(_, _, a)| *a)
+            }
+            (false, None) => Some(untagged[&format!("{b}/head")]),
+        };
         let plan = plan_transition(
             &fade_song_of(&case["current"]),
             Some(&next),
@@ -309,6 +328,10 @@ fn check(vectors: &Value) -> Vec<String> {
             head,
             &PlanSettings {
                 max_overlap_ms: int(settings, "maxOverlapMs"),
+                longest_intro_ms: settings
+                    .get("longestIntroMs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(AUTOMIX_LONGEST_INTRO_MS),
                 smart: flag(settings, "smart"),
                 filter_sweeps: flag(settings, "filterSweeps"),
                 beat_match: flag(settings, "beatMatch"),
@@ -348,6 +371,46 @@ fn check(vectors: &Value) -> Vec<String> {
         if flag(e, "late") != plan.late {
             c.fail(format!("{what}: late {}", plan.late));
         }
+        c.near(
+            &format!("{what} latestEndMs"),
+            Some(num(e, "latestEndMs")),
+            Some(plan.latest_end_ms as f64),
+            t("ms"),
+        );
+        for (key, actual) in [("holdShare", plan.hold_share), ("riseShare", plan.rise_share)] {
+            c.near(&format!("{what} {key}"), Some(num(e, key)), Some(actual), t("curve"));
+        }
+        c.near(&format!("{what} introLevel"), Some(num(e, "introLevel")), Some(plan.intro_level), t("level"));
+        let bars = int(e, "lateMoveBars");
+        if bars != plan.late_move_bars as i64 {
+            c.fail(format!("{what}: lateMoveBars {}, expected {bars}", plan.late_move_bars));
+        }
+        c.near(
+            &format!("{what} bothHeardStartMs"),
+            Some(num(e, "bothHeardStartMs")),
+            Some(plan.both_heard_start_ms as f64),
+            t("ms"),
+        );
+        c.near(
+            &format!("{what} bothHeardEndMs"),
+            Some(num(e, "bothHeardEndMs")),
+            Some(plan.both_heard_end_ms as f64),
+            t("ms"),
+        );
+        c.near(&format!("{what} lockMs"), Some(num(e, "lockMs")), Some(plan.lock_ms), t("ms") / 10.0);
+        c.near(&format!("{what} driftGap"), Some(num(e, "driftGap")), Some(plan.drift_gap), t("rate"));
+        c.near(
+            &format!("{what} dropCutAtHalfSpeedMs"),
+            num_or_none(e, "dropCutAtHalfSpeedMs"),
+            plan.drop_cut_at_ms(0.5, 0.0),
+            t("ms"),
+        );
+        c.near(
+            &format!("{what} driftAtEndMs"),
+            Some(num(e, "driftAtEndMs")),
+            Some(plan.drift_at_end_ms),
+            t("ms") / 10.0,
+        );
         if text(e, "reason") != plan.reason {
             c.fail(format!("{what}: reason \"{}\", expected \"{}\"", plan.reason, text(e, "reason")));
         }
@@ -367,6 +430,14 @@ fn check(vectors: &Value) -> Vec<String> {
             Some(automix_in_gain(time, k)),
             t("curve"),
         );
+    }
+    for g in list(vectors, "introGains") {
+        let (time, hold, rise, level) =
+            (num(g, "t"), num(g, "holdShare"), num(g, "riseShare"), num(g, "level"));
+        let (out, gain_in) = intro_gains(time, hold, rise, level);
+        let what = format!("intro at {time}, hold {hold}, rise {rise}, level {level}");
+        c.near(&format!("{what}: out"), Some(num(g, "out")), Some(out), t("curve"));
+        c.near(&format!("{what}: in"), Some(num(g, "in")), Some(gain_in), t("curve"));
     }
     for f in list(vectors, "filters") {
         let (time, s) = (num(f, "t"), num(f, "strength"));
@@ -443,6 +514,13 @@ fn check(vectors: &Value) -> Vec<String> {
             Some(actual),
             t("curve"),
         );
+    }
+    for d in list(vectors, "dropCuts") {
+        let heard = (num(d, "bothHeardStartMs"), num(d, "bothHeardEndMs"));
+        let (lock, gap, speed, from) =
+            (num(d, "lockMs"), num(d, "driftGap"), num(d, "speed"), num(d, "fromMs"));
+        let actual = planner::drop_cut_at_ms(heard, num(d, "holdEndMs"), lock, gap, speed, from);
+        c.near(&format!("drop cut for {d}"), num_or_none(d, "cutAtMs"), actual, t("curve"));
     }
     c.failures
 }

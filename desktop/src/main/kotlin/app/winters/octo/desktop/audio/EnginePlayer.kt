@@ -27,6 +27,7 @@ import app.winters.octo.desktop.player.lineupStep
 import app.winters.octo.desktop.player.liveNow
 import app.winters.octo.desktop.player.shownLive
 import app.winters.octo.discovery.knownLengthMs
+import app.winters.octo.connection.GatewayWords
 import app.winters.octo.playback.PlayFailure
 import app.winters.octo.playback.QueueSource
 import app.winters.octo.playback.RealLengths
@@ -122,6 +123,15 @@ class EnginePlayer(
 
     // The entry keys the engine's queue holds, in its order.
     private var mirror: List<Long> = emptyList()
+
+    // How many times a version picked for an entry started it over, by key:
+    // each restart is a new play, and its address says so (see queueItem).
+    private val restarts = HashMap<Long, Int>()
+
+    // Entries opened again because the server began sending another file
+    // for them mid-song, once a play each: a file that keeps changing fails
+    // like any other song that cannot play.
+    private val reopened = HashSet<Long>()
 
     // Where a command sent the engine, shown until the engine is heard
     // there, since the engine does it a moment later on its own thread.
@@ -225,7 +235,7 @@ class EnginePlayer(
         val ms = lengths.learn(entry.song.id, knownLengthMs(entry.song), engineMs) ?: return false
         if (!queue.updateSong(entry.song.id) { it.withLengthMs(ms) }) return false
         val current = queue.currentEntry
-        if (current != null && current.key in mirror) engine.replaceQueue(engineOrder().map { queueItem(it, sources) }, mirror.indexOf(current.key))
+        if (current != null && current.key in mirror) engine.replaceQueue(engineOrder().map(::itemOf), mirror.indexOf(current.key))
         return true
     }
 
@@ -517,6 +527,49 @@ class EnginePlayer(
         setRepeat(saved.repeat)
     }
 
+    // The server's address, sign-in or headers changed: every queued song is
+    // asked for afresh where it is now, from the same place in the song,
+    // still playing when it was. The engine's queue is loaded anew rather
+    // than replaced, so nothing of the old one (its decks' options, a song
+    // marked failed) carries over. A station is an outside server's, so it
+    // plays on.
+    override fun reconnect() {
+        val heard = engine.heard()
+        synchronized(lock) {
+            val current = queue.currentEntry ?: return
+            if (isRadio(current.song.id)) return
+            load(startMs = positionLocked(heard), play = playing)
+            publish()
+        }
+    }
+
+    // A version picked for the song playing: it plays again from its start as
+    // a new play, its address naming the next restart. Nothing the engine
+    // learned of the old file stays: its queue is loaded anew (as reconnect
+    // does), so the scouting of the songs starts over, the entry's profile is
+    // taken back, and a file changing under it may be opened again once more.
+    override fun restartCurrent() {
+        synchronized(lock) {
+            val current = queue.currentEntry ?: return
+            if (isRadio(current.song.id)) return
+            restarts[current.key] = (restarts[current.key] ?: 0) + 1
+            reopened.remove(current.key)
+            profiles?.forgetEntry(current.key)
+            playing = true
+            problem = null
+            load(startMs = 0, play = true)
+            publish()
+        }
+    }
+
+    // The songs' kept profiles go; the playing entry and the next are asked
+    // about again.
+    override fun filesChanged(ids: Set<String>?) {
+        val profiles = profiles ?: return
+        profiles.forget(ids)
+        synchronized(lock) { askProfiles() }
+    }
+
     // The repeat the engine plays by: the listener's, and off while a
     // station plays.
     private fun repeatForEngine(): EngineRepeat = when {
@@ -570,7 +623,7 @@ class EnginePlayer(
         mirror = ordered.map { it.key }
         // A live stream starts where its station is.
         val start = if (live) 0 else startMs
-        engine.load(ordered.map { queueItem(it, sources) }, mirror.indexOf(current.key), start, play)
+        engine.load(ordered.map(::itemOf), mirror.indexOf(current.key), start, play)
         expect(current.key)
         setPending(current.key, start)
         askProfiles()
@@ -605,7 +658,7 @@ class EnginePlayer(
         val ordered = engineOrder()
         val keys = ordered.map { it.key }
         if (keys == mirror) return
-        engine.replaceQueue(ordered.map { queueItem(it, sources) }, keys.indexOf(current.key))
+        engine.replaceQueue(ordered.map(::itemOf), keys.indexOf(current.key))
         mirror = keys
         askProfiles()
     }
@@ -636,6 +689,9 @@ class EnginePlayer(
     }
 
     private fun positionMsLocked(): Long = pending?.ms ?: lastShown
+
+    // An entry as the engine takes it, its address naming this play of it.
+    private fun itemOf(entry: QueueEntry) = queueItem(entry, sources, restarts[entry.key] ?: 0)
 
     private fun expect(key: Long) {
         expecting = key
@@ -684,8 +740,16 @@ class EnginePlayer(
                 }
                 is EngineEvent.Error -> {
                     val failed = keyOfItem(event.itemId)?.let { key -> queue.songs.firstOrNull { it.key == key } }
-                    problem = PlayProblem(plainWords(event.kind, failed?.song?.isExternal == true), failed?.song, event.message.takeIf(String::isNotBlank))
-                    if (keyOfItem(event.itemId) == expecting) expecting = null
+                    // The server began sending another file for the song
+                    // playing: it opens again where it was, in an engine queue
+                    // made afresh, once a play of the entry.
+                    val current = queue.currentEntry?.key
+                    if (event.kind == ErrorKind.FILE_CHANGED && failed != null && failed.key == current && reopened.add(failed.key)) {
+                        load(startMs = positionLocked(engine.heard()), play = playing)
+                    } else {
+                        problem = PlayProblem(plainWords(event.kind, failed?.song?.isExternal == true), failed?.song, event.message.takeIf(String::isNotBlank))
+                        if (keyOfItem(event.itemId) == expecting) expecting = null
+                    }
                 }
                 is EngineEvent.StreamTitle -> {
                     val key = keyOfItem(event.itemId) ?: return
@@ -852,13 +916,17 @@ fun loudness(volume: Float): Float = volume.coerceIn(0f, 1f).let { it * it }
 
 // Why a song would not play, in plain words, the same as the phone's. A
 // song found online (`outside`) was never on the server, so a "not found"
-// for it is the server not sending it.
-fun plainWords(kind: ErrorKind, outside: Boolean = false): String = when (kind) {
-    ErrorKind.NOT_FOUND -> if (outside) PlayFailure.Refused else PlayFailure.Missing
-    ErrorKind.HTTP -> PlayFailure.Refused
-    ErrorKind.NETWORK -> PlayFailure.Unreachable
-    ErrorKind.UNSUPPORTED -> PlayFailure.Unsupported
-    ErrorKind.DECODE -> PlayFailure.Damaged
-    ErrorKind.DEVICE -> PlayFailure.Device
-    else -> PlayFailure.Other
-}.words
+// for it is the server not sending it. A sign-in page that answered in the
+// song's place is said as such.
+fun plainWords(kind: ErrorKind, outside: Boolean = false): String {
+    if (kind == ErrorKind.SIGN_IN_PAGE) return GatewayWords.PLAY_FAILURE
+    return when (kind) {
+        ErrorKind.NOT_FOUND -> if (outside) PlayFailure.Refused else PlayFailure.Missing
+        ErrorKind.HTTP -> PlayFailure.Refused
+        ErrorKind.NETWORK -> PlayFailure.Unreachable
+        ErrorKind.UNSUPPORTED -> PlayFailure.Unsupported
+        ErrorKind.DECODE -> PlayFailure.Damaged
+        ErrorKind.DEVICE -> PlayFailure.Device
+        else -> PlayFailure.Other
+    }.words
+}

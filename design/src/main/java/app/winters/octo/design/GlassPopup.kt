@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -122,7 +123,7 @@ const val PopupHeightShare = 0.6f
 
 // The film under a menu: darker than the bar's, since text sits on it and
 // the page behind may be text too.
-val PopupFilm = Color.Black.copy(alpha = 0.52f)
+val PopupFilm: Color @Composable @ReadOnlyComposable get() = glassFilm(0.52f)
 
 // How hard a pop-up frosts what is behind it, as a CSS blur. The same glass
 // as the bar's, frosted harder since text sits on it.
@@ -147,7 +148,9 @@ private class PopupPlacing {
 // `onBack`, which answers true when it went back a page instead. It is at
 // most `maxWidth` wide and `heightShare` of the screen tall; the content
 // scrolls itself within that. While the keyboard is up it keeps above it,
-// moving over the control when there is no room under it any more.
+// moving over the control when there is no room under it any more. It keeps
+// the look and the `backdrop` it opened with until it has shrunk away, so a
+// menu opened over the player still frosts the player as both go.
 @Composable
 fun GlassPopup(
     visible: Boolean,
@@ -159,6 +162,23 @@ fun GlassPopup(
     maxWidth: Dp = PopupMaxWidth,
     heightShare: Float = PopupHeightShare,
     onBack: () -> Boolean = { false },
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val frosts = rememberHeld(visible, backdrop)
+    HoldLook(visible) { PopupBody(visible, anchor, onDismiss, frosts, modifier, title, maxWidth, heightShare, onBack, content) }
+}
+
+@Composable
+private fun PopupBody(
+    visible: Boolean,
+    anchor: IntRect?,
+    onDismiss: () -> Unit,
+    backdrop: HazeState,
+    modifier: Modifier,
+    title: String?,
+    maxWidth: Dp,
+    heightShare: Float,
+    onBack: () -> Boolean,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val state = remember { MutableTransitionState(false) }

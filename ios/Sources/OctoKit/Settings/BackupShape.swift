@@ -142,6 +142,7 @@ extension BackupShape {
     )
 
     static let player = fields(
+        BackupField("settingsVersion", .int), BackupField("betweenSongs", .choice),
         BackupField("liveBackground", .flag),
         BackupField("background", fields(
             BackupField("mode", .choice), BackupField("brightnessCap", .int), BackupField("saturation", .int),
@@ -160,7 +161,8 @@ extension BackupShape {
         )),
         BackupField("reduceMotion", .flag), BackupField("castRenderers", .flag), BackupField("castKeepPlaying", .flag),
         BackupField("libraryOnly", .flag), BackupField("swipeAction", .choice), BackupField("accent", .choice), BackupField("glassTint", .flag),
-        BackupField("animatedArt", .choice)
+        BackupField("animatedArt", .choice),
+        BackupField("theme", .choice), BackupField("themeLight", .choice), BackupField("themeDark", .choice), BackupField("themeMatch", .flag)
     )
 
     static let streaming = fields(
@@ -182,7 +184,8 @@ extension BackupShape {
 
     static let offline = fields(
         BackupField("cacheSize", .choice), BackupField("prefetchWifi", .int), BackupField("prefetchMobile", .int),
-        BackupField("downloadQuality", .choice), BackupField("wifiOnly", .flag), BackupField("streamOnWifi", .flag),
+        BackupField("downloadQuality", .choice), BackupField("downloadFormat", .choice), BackupField("wifiOnly", .flag),
+        BackupField("streamOnWifi", .flag),
         BackupField("keepLiked", .flag), BackupField("keptPlaylists", .list(.text))
     )
 

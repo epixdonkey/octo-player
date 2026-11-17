@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -16,11 +17,11 @@ import androidx.compose.ui.graphics.painter.Painter
 import app.winters.octo.design.FrameSize
 import app.winters.octo.design.DesktopType
 import app.winters.octo.design.OctoColors
+import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.Space
 import app.winters.octo.design.Txt
 import app.winters.octo.desktop.AppState
 import app.winters.octo.desktop.settings.AppSettings
-import app.winters.octo.desktop.settings.DesktopOs
 import app.winters.octo.desktop.system.LocalSystem
 import app.winters.octo.desktop.system.copyBugDetails
 import app.winters.octo.desktop.system.logFolder
@@ -29,47 +30,35 @@ import app.winters.octo.update.InstallWhen
 import app.winters.octo.update.UpdatePrefs
 import kotlinx.coroutines.launch
 
-// Settings > About: Octo and its version, a ready update with what is new
-// in it, and how Octo looks for new versions.
+// Settings > About Octo: Octo and its version, a ready update with what is
+// new in it, how Octo looks for new versions, and help for a bug report.
 @Composable
 internal fun AboutRows(app: AppState, settings: AppSettings) {
     val updates = app.updates
     val ready = updates?.ready
     AboutCard()
-    if (updates != null && ready != null) {
-        Rows {
-            SettingRow("Update ready: ${ready.version}", updates.installHelp(ready)) {
-                val system = LocalSystem.current
-                RowAction(updates.installAction, { updates.install(quit = { system?.quit?.invoke() }) })
-            }
-        }
-    }
-    if (ready != null && ready.notes.isNotBlank()) {
-        Card {
-            Txt(
-                ready.notes.trim(),
-                DesktopType.meta,
-                OctoColors.TextSecondary,
-                Modifier.fillMaxWidth().padding(horizontal = RowInset, vertical = Space.L),
-                maxLines = NOTES_LINES,
-            )
-        }
-    }
     if (updates != null) {
         val prefs = settings.updates
         fun change(edit: (UpdatePrefs) -> UpdatePrefs) = app.settings.update { it.copy(updates = edit(it.updates)) }
-        Group("Updates") {
+        SettingsCard("Updates", OctoIcons.Upgrade) {
+            if (ready != null) {
+                SettingRow("Update ready: ${ready.version}", updates.installHelp(ready), stable = "Update ready: ...", id = "update-ready") {
+                    val system = LocalSystem.current
+                    AccentPill(updates.installAction, { updates.install(quit = { system?.quit?.invoke() }) })
+                }
+                if (ready.notes.isNotBlank()) ReleaseNotes(ready.notes)
+            }
             val availability = updates.availability
             if (availability is UpdaterAvailability.Off || !updates.enabled) {
                 SettingRow("New versions", (availability as? UpdaterAvailability.Off)?.why)
-                return@Group
+                return@SettingsCard
             }
             SwitchRow(
                 "Check for updates automatically",
                 "Looks every few hours and downloads in the background.",
                 prefs.checkAutomatically,
             ) { on -> change { it.copy(checkAutomatically = on) } }
-            if (app.os == DesktopOs.Windows) {
+            if (updates.selfInstalls) {
                 ChoiceRow(
                     "Install updates",
                     installHelp(prefs.install),
@@ -92,14 +81,14 @@ internal fun AboutRows(app: AppState, settings: AppSettings) {
             )
         }
     }
-    Group("Help") {
+    SettingsCard("Help", OctoIcons.Info) {
         SettingRow("Details for a bug report", "Version, graphics and memory, to paste into an issue.") {
             RowAction("Copy", { app.scope.launch { copyBugDetails(app, null, logFolder(app.os)) } })
         }
     }
 }
 
-// Octo's octopus, its name and the version.
+// Octo's octopus, and its name with the version beside it.
 @Composable
 private fun AboutCard() {
     val octopus = remember { octopusPicture() }
@@ -109,15 +98,43 @@ private fun AboutCard() {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Space.Xl),
         ) {
-            octopus?.let { Image(it, contentDescription = null, modifier = Modifier.size(FrameSize.OpeningMark / 2)) }
-            Column {
-                Txt("Octo", DesktopType.section)
+            Image(octopus, contentDescription = null, modifier = Modifier.size(FrameSize.OpeningMark / 2))
+            Row(horizontalArrangement = Arrangement.spacedBy(Space.M)) {
+                Txt("Octo", DesktopType.section, modifier = Modifier.alignByBaseline())
                 val version = appVersion()
-                Txt(if (version.first().isDigit()) "Version $version" else version, DesktopType.meta, OctoColors.TextMuted, Modifier.padding(top = Space.Xxs))
+                Txt(if (version.first().isDigit()) "Version $version" else version, DesktopType.meta, OctoColors.TextMuted, Modifier.alignByBaseline())
             }
         }
     }
 }
+
+// A release's notes under its row, their first lines: a "- " item drawn
+// as a bullet, its words hanging clear of it when they run on.
+@Composable
+private fun ReleaseNotes(notes: String) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = RowInset, vertical = Space.L), verticalArrangement = Arrangement.spacedBy(Space.Xxs)) {
+        notes.trim().lines().filter { it.isNotBlank() }.take(NOTES_LINES).forEach { line ->
+            val item = noteItem(line)
+            if (item == null) {
+                Txt(line.trim(), DesktopType.meta, OctoColors.TextSecondary, maxLines = 3)
+            } else {
+                Row {
+                    Txt("•", DesktopType.meta, OctoColors.TextSecondary, Modifier.width(NoteIndent))
+                    Txt(item, DesktopType.meta, OctoColors.TextSecondary, Modifier.weight(1f), maxLines = 3)
+                }
+            }
+        }
+    }
+}
+
+// A note's words when it is a "- " (or "* ") item, else null.
+internal fun noteItem(line: String): String? {
+    val trimmed = line.trimStart()
+    return if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) trimmed.drop(2).trim() else null
+}
+
+// How far a note item's words hang in from its bullet.
+private val NoteIndent = Space.L
 
 // The octopus the window opens on, drawn from the vector at its size.
 private fun octopusPicture(): Painter = OctopusPainter()

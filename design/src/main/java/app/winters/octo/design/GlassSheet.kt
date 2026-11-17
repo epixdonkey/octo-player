@@ -3,6 +3,7 @@ package app.winters.octo.design
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -50,7 +52,7 @@ import kotlinx.coroutines.launch
 private val SheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
 
 // Solid enough to read on over any background, with a little accent in it.
-val SheetFill: Color get() = mix(OctoColors.Background, OctoColors.GlassAccent, 0.05f).copy(alpha = 0.97f)
+val SheetFill: Color @Composable @ReadOnlyComposable get() = LocalOctoSurfaces.current.sheet
 
 // A panel that rises from the bottom over a dimmed screen, at most 70% of
 // the screen tall; what does not fit scrolls. Tapping the dim area, pulling the panel down, or back
@@ -65,6 +67,17 @@ fun GlassSheet(
     onDismiss: () -> Unit,
     tall: Boolean = false,
     scrolls: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    HoldLook(visible) { SheetBody(visible, onDismiss, tall, scrolls, content) }
+}
+
+@Composable
+private fun SheetBody(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    tall: Boolean,
+    scrolls: Boolean,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val dismiss by rememberUpdatedState(onDismiss)
@@ -86,6 +99,8 @@ fun GlassSheet(
             exit = slideOutVertically(octoTween(motion, OctoDuration.Card, OctoEasing.EaseIn)) { it },
             modifier = Modifier.align(Alignment.BottomCenter).then(if (tall) Modifier.statusBarsPadding() else Modifier),
         ) {
+            // Where the sheet is headed: Visible until its owner lets it go.
+            val stage = transition
             BoxWithConstraints {
                 val scope = rememberCoroutineScope()
                 val density = LocalDensity.current
@@ -95,11 +110,11 @@ fun GlassSheet(
                         .fillMaxWidth()
                         .heightIn(max = if (tall) maxHeight else maxHeight * 0.7f)
                         .graphicsLayer { translationY = pull }
-                        .dropShadow(SheetShape, Shadow(radius = shadowBlur(32f), color = Color.Black.copy(alpha = 0.4f)))
+                        .dropShadow(SheetShape, Shadow(radius = shadowBlur(32f), color = shadowColor(0.4f)))
                         .clip(SheetShape)
                         .background(SheetFill)
                         // Light along the top edge, as on the other glass.
-                        .innerShadow(SheetShape, Shadow(radius = 0.dp, color = Color.White.copy(alpha = 0.10f), offset = DpOffset(0.dp, 1.dp)))
+                        .innerShadow(SheetShape, Shadow(radius = 0.dp, color = glassRim(0.10f), offset = DpOffset(0.dp, 1.dp)))
                         // Swallows taps so they do not reach the dim area.
                         .clickable(interactionSource = null, indication = null) {}
                         .navigationBarsPadding(),
@@ -114,10 +129,15 @@ fun GlassSheet(
                                 onDragStopped = { velocity ->
                                     val far = with(density) { 96.dp.toPx() }
                                     val fast = with(density) { 1_200.dp.toPx() }
-                                    if (pull > far || velocity > fast) {
-                                        dismiss()
-                                    } else {
-                                        scope.launch { animate(pull, 0f, animationSpec = spring(0.8f, 400f)) { v, _ -> pull = v } }
+                                    if (pull > far || velocity > fast) dismiss()
+                                    // Back to rest unless it is on its way out: a sheet
+                                    // whose dismiss refuses (a change still running)
+                                    // settles in place, and one that closes slides away
+                                    // from where the pull left it.
+                                    scope.launch {
+                                        animate(pull, 0f, animationSpec = spring(0.8f, 400f)) { v, _ ->
+                                            if (stage.targetState == EnterExitState.Visible) pull = v
+                                        }
                                     }
                                 },
                             )

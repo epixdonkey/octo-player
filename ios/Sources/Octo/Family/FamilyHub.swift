@@ -33,6 +33,8 @@ final class FamilyHub {
     @ObservationIgnored private var watch: Watch<String?>?
     /// The clipboard text last offered, so the same link is offered once.
     @ObservationIgnored private var offered: String?
+    /// Counts each opening of a family link, so the same link opened again gets a cover of its own.
+    @ObservationIgnored private var joinOpens = 0
 
     init(session: Session, router: Router) {
         self.session = session
@@ -72,7 +74,16 @@ final class FamilyHub {
         case .family:
             router.openInSettings(.family)
         case .join(let link):
-            router.signIn = .join(familyAppLink(link))
+            // A sign-in that is open is never replaced: its form says so under its address, and the
+            // message offers the link again.
+            guard !router.hasOpenSignIn else {
+                router.noteLink(SignInWords.linkWhileSignInOpen)
+                router.show(SignInWords.linkWhileSignInOpen, action: "Use it") { [weak self] in self?.open(.join(link)) }
+                return
+            }
+            joinOpens += 1
+            router.setAside()
+            router.signIn = .join(familyAppLink(link), opened: joinOpens)
         }
     }
 
@@ -121,7 +132,7 @@ final class FamilyHub {
                 if saving { savedHere.insert(id) } else { savedHere.remove(id) }
                 router.show(saving ? "Saved \(title). Find it in Family, under Saved." : "Took \(title) off Saved")
             } catch {
-                let message = SubsonicError(error).message
+                let message = GatewayWords.failureFor(error) ?? SubsonicError(error).message
                 router.show(message.isEmpty ? "The server did not save it." : message)
             }
             await model.refresh()
@@ -149,7 +160,7 @@ final class FamilyHub {
                 try await client.removeFromMyLibrary(serverId)
                 router.show("Removed \(title) from your library", done: true)
             } catch {
-                let message = SubsonicError(error).message
+                let message = GatewayWords.failureFor(error) ?? SubsonicError(error).message
                 router.show(message.isEmpty ? "The server kept \(title)." : message)
             }
         }

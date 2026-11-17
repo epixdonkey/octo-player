@@ -69,8 +69,8 @@ fun LineSlider(
     modifier: Modifier = Modifier,
     live: Boolean = false,
     wheelStep: Float? = null,
-    color: Color = Color.White,
-    trackColor: Color = Color.White.copy(alpha = 0.22f),
+    color: Color = OctoColors.TextPrimary,
+    trackColor: Color = OctoColors.TextPrimary.copy(alpha = 0.22f),
     onRelease: () -> Unit = {},
     hoverLabel: ((Float) -> String)? = null,
     look: SliderLook = SliderLook.Glow,
@@ -112,6 +112,13 @@ fun LineSlider(
     val jewel = if (look == SliderLook.Jewel) rememberJewelLook(hovered, held) else null
     val followed = if (look == SliderLook.Jewel) rememberFollowedFraction(fraction, dragging) else null
     val measurer = rememberTextMeasurer()
+    val jewelTrack = OctoColors.OffTrack
+    val jewelShadow = shadowColor(1f)
+    val jewelTick = OctoColors.TextPrimary.copy(alpha = 0.30f)
+    // On a light theme the white thumb keeps an edge on the pale page.
+    val thumbEdge = if (LocalOctoSurfaces.current.light) OctoColors.Edge else Color.Transparent
+    val bubbleFill = glassFilm(0.72f)
+    val bubbleWords = OctoColors.TextPrimary
 
     Box(
         modifier
@@ -176,7 +183,7 @@ fun LineSlider(
                 val y = size.height / 2
                 if (jewel != null) {
                     val shown = if (dragging) dragFraction else followed?.value ?: current()
-                    drawJewelSlider(y, shown, jewel, fill, steps, valueLabel?.invoke(shown), measurer)
+                    drawJewelSlider(y, shown, jewel, fill, jewelTrack, bubbleFill, bubbleWords, steps, valueLabel?.invoke(shown), measurer, jewelTrack, jewelShadow, jewelTick, thumbEdge)
                     return@drawBehind
                 }
                 val stroke = thickness.toPx()
@@ -201,14 +208,14 @@ fun LineSlider(
                 val at = if (dragging) dragFraction else pointerFraction
                 val words = hoverWords
                 if (words != null && at >= 0f && (hovered || dragging)) {
-                    val text = measurer.measure(words(at), OctoType.caption.copy(fontSize = 11.sp, color = Color.White, fontFeatureSettings = "tnum"))
+                    val text = measurer.measure(words(at), OctoType.caption.copy(fontSize = 11.sp, color = bubbleWords, fontFeatureSettings = "tnum"))
                     val padX = 7.dp.toPx()
                     val padY = 2.dp.toPx()
                     val w = text.size.width + padX * 2
                     val h = text.size.height + padY * 2
                     val left = (size.width * at - w / 2).coerceIn(-w / 2, size.width - w / 2)
                     val top = y - 10.dp.toPx() - h
-                    drawRoundRect(Color.Black.copy(alpha = 0.72f), Offset(left, top), Size(w, h), CornerRadius(h / 2))
+                    drawRoundRect(bubbleFill, Offset(left, top), Size(w, h), CornerRadius(h / 2))
                     drawText(text, topLeft = Offset(left + padX, top + padY))
                 }
             },

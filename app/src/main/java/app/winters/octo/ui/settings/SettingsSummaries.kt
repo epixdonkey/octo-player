@@ -8,11 +8,15 @@ import app.winters.octo.device.MusicFolder
 import app.winters.octo.listening.ListenBrainzPrefs
 import app.winters.octo.offline.CacheSize
 import app.winters.octo.offline.OfflinePrefs
+import app.winters.octo.playback.BetweenSongs
 import app.winters.octo.playback.StreamQuality
 import app.winters.octo.playback.speedLabel
 import app.winters.octo.player.PlayerPrefs
 import app.winters.octo.player.StreamPrefs
 import app.winters.octo.radio.RadioDiscovery
+import app.winters.octo.server.CopyRunState
+import app.winters.octo.server.copyStatus
+import app.winters.octo.theme.ThemeChoice
 
 // The one line under each category on the front page, saying how it is set
 // now. Parts are joined with a middle dot, and the most telling come first.
@@ -35,8 +39,16 @@ internal val StreamQuality.label: String get() = kbps?.let { "$it kbps" } ?: "Or
 // A cache size as the settings show it.
 internal val CacheSize.label: String get() = if (this == CacheSize.Off) "Off" else "${bytes shr 30} GB"
 
+// What plays between songs, as the front page says it: "Automix",
+// "Crossfade 8 s" or "Gapless".
+fun betweenSongsSummary(prefs: PlayerPrefs): String = when (prefs.betweenSongs) {
+    BetweenSongs.Gapless -> "Gapless"
+    BetweenSongs.Crossfade -> "Crossfade ${prefs.crossfadeSeconds} s"
+    BetweenSongs.Automix -> "Automix"
+}
+
 fun playbackSummary(prefs: PlayerPrefs): String = line(
-    if (prefs.crossfade) "Crossfade ${prefs.crossfadeSeconds} s" else "Gapless",
+    betweenSongsSummary(prefs),
     speedLabel(prefs.speed).takeIf { !prefs.paceIsDefault },
     "Autoplay".takeIf { prefs.autoplay },
     "Skip silence".takeIf { prefs.skipSilence },
@@ -48,7 +60,8 @@ fun radioSummary(prefs: PlayerPrefs): String = line(
     "Live radio",
 )
 
-fun appearanceSummary(ambient: AmbientPrefs, liveBackground: Boolean): String = line(
+fun appearanceSummary(theme: ThemeChoice, ambient: AmbientPrefs, liveBackground: Boolean): String = line(
+    theme.label,
     when (ambient.strength) {
         AmbientStrength.Off -> "No glow"
         AmbientStrength.Subtle -> "Subtle glow"
@@ -63,9 +76,9 @@ fun librarySummary(access: Access, songs: Int, folders: List<MusicFolder>): Stri
     return line(count(songs, "song", "songs"), count(left, "folder", "folders").plus(" left out").takeIf { left > 0 })
 }
 
-// The phone's part of the account card.
+// The phone's part of the account card, short enough for its one line.
 fun phoneLine(access: Access, songs: Int): String =
-    if (access == Access.Granted) count(songs, "song", "songs") + " on this phone" else "Allow access to the music on this phone"
+    if (access == Access.Granted) count(songs, "song", "songs") + " on this phone" else "Allow music on this phone"
 
 // How long ago something happened, in words: "Just now", "5 min ago".
 fun timeAgo(at: Long, now: Long): String {
@@ -85,8 +98,10 @@ fun syncedAgo(at: Long, now: Long): String = "Synced " + timeAgo(at, now).replac
 // How the server is doing, for the account card and its category: syncing,
 // or where it is reached from and how fresh the copy is. Place is null when
 // the server has only one address.
-fun serverStatus(syncing: Boolean, place: Place?, syncedAt: Long?, now: Long): String {
-    if (syncing) return "Syncing…"
+// While a copy runs (`run`), how far it is: "Syncing, 15%".
+fun serverStatus(syncing: Boolean, place: Place?, syncedAt: Long?, now: Long, run: CopyRunState? = null): String {
+    if (run != null) return copyStatus(run)
+    if (syncing) return "Syncing"
     return line(
         when (place) {
             Place.Home -> "Connected at home"

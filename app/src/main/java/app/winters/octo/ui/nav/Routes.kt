@@ -1,6 +1,7 @@
 package app.winters.octo.ui.nav
 
 import androidx.navigation3.runtime.NavKey
+import app.winters.octo.data.SignInAsk
 import app.winters.octo.ui.settings.SettingsPage
 import app.winters.octo.query.LibraryQuery
 import kotlinx.serialization.Serializable
@@ -51,6 +52,9 @@ import kotlinx.serialization.Serializable
 @Serializable data object DownloadsRoute : NavKey
 @Serializable data class PlaylistRoute(val id: String) : NavKey
 
+// A playlist folder's page.
+@Serializable data class PlaylistFolderRoute(val id: String) : NavKey
+
 // A live list: songs picked by rules, kept on the phone.
 @Serializable data class LiveListRoute(val id: String) : NavKey
 
@@ -76,8 +80,9 @@ enum class ServerForm {
 }
 
 // The sign-in form for one of the kept servers (`id`), or a new one, with a
-// note to show first (why its password is asked for).
-@Serializable data class ServerFormRoute(val form: ServerForm, val id: String? = null, val note: String? = null) : NavKey
+// note to show first (why its password is asked for). `asked`: Octo opened
+// it by itself (a sign-in it asked for), not the person.
+@Serializable data class ServerFormRoute(val form: ServerForm, val id: String? = null, val note: String? = null, val asked: Boolean = false) : NavKey
 @Serializable data object OctoAdminRoute : NavKey
 @Serializable data object ImportRoute : NavKey
 
@@ -85,8 +90,48 @@ enum class ServerForm {
 // manager, the members and the requests waiting.
 @Serializable data object FamilyRoute : NavKey
 
-// Signing up or signing in, filled in from a family link.
-@Serializable data class FamilyJoinRoute(val link: String) : NavKey
+// Signing up or signing in, filled in from a family link: which opening of
+// it, so each opening is a page (and a view model) of its own. A back stack
+// saved before openings were counted reads as 0.
+@Serializable data class FamilyJoinRoute(val link: String, val opened: Long = 0) : NavKey
+
+// Opens a family link's page: one already on top is replaced, so going back
+// never lands on a spent invite's form; on any other top it is added. One
+// write either way.
+fun MutableList<NavKey>.openJoin(route: FamilyJoinRoute) {
+    if (lastOrNull() is FamilyJoinRoute) this[lastIndex] = route else add(route)
+}
+
+// Removes the topmost entry equal to `key`, and nothing else: a page that
+// signs in closes itself this way, so a page pushed over it while it ran is
+// never the one closed. Nothing changes when no entry is `key` (a page
+// already gone).
+fun MutableList<NavKey>.removeOwn(key: NavKey) {
+    val at = lastIndexOf(key)
+    if (at >= 0) removeAt(at)
+}
+
+// Removes every page of a sign-in Octo asked for by itself, and answers
+// their asks, the lowest first.
+fun MutableList<NavKey>.removeAsked(): List<SignInAsk> {
+    val asked = filterIsInstance<ServerFormRoute>().filter { it.asked && it.id != null }
+    removeAll { it is ServerFormRoute && it.asked && it.id != null }
+    return asked.mapNotNull { route -> route.id?.let { SignInAsk(it, route.note) } }
+}
+
+// Where tapping the current tab again stops: its root, or, while a sign-in
+// is open anywhere, the sign-in page nearest the top of this tab, which is
+// landed on rather than thrown away.
+fun reselectTo(stack: List<NavKey>, anyOpen: Boolean): Int {
+    if (!anyOpen) return 0
+    return stack.indexOfLast(::isSignInRoute).coerceAtLeast(0)
+}
+
+// Takes this tab back to where tapping it again stops.
+fun MutableList<NavKey>.reselect(anyOpen: Boolean) {
+    val keep = reselectTo(this, anyOpen)
+    while (size > keep + 1) removeAt(lastIndex)
+}
 
 // The charts and new songs, on an Octo server that has them.
 @Serializable data object ChartsRoute : NavKey

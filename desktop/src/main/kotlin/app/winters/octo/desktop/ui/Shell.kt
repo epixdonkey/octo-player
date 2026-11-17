@@ -1,7 +1,20 @@
 package app.winters.octo.desktop.ui
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.wrapContentWidth
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.lerp
+import app.winters.octo.design.LocalReduceMotion
+import app.winters.octo.design.OctoEasing
+import app.winters.octo.design.SettingsSize
+import app.winters.octo.desktop.nav.SettingsKey
+import app.winters.octo.desktop.pages.SettingsList
+import app.winters.octo.desktop.pages.settingsListNeeds
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.animation.core.tween
@@ -61,6 +74,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.toArgb
+import app.winters.octo.theme.keyForTheme
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isBackPressed
@@ -80,6 +95,7 @@ import app.winters.octo.design.Corner
 import app.winters.octo.design.FloatingGlaze
 import app.winters.octo.design.FrameSize
 import app.winters.octo.design.GlassField
+import app.winters.octo.design.HoldLook
 import app.winters.octo.design.IconAction
 import app.winters.octo.design.IconSize
 import app.winters.octo.design.LocalPopups
@@ -90,6 +106,7 @@ import app.winters.octo.design.MenuShape
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
+import app.winters.octo.design.OverArt
 import app.winters.octo.design.PopupLayer
 import app.winters.octo.design.Space
 import app.winters.octo.design.TextAction
@@ -128,8 +145,6 @@ import app.winters.octo.desktop.pages.SearchPage
 import app.winters.octo.desktop.pages.SettingsPage
 import app.winters.octo.desktop.pages.SignInPage
 import app.winters.octo.desktop.pages.SongsPage
-import app.winters.octo.desktop.pages.SoundPage
-import app.winters.octo.desktop.settings.AmbienceStyle
 import app.winters.octo.desktop.search.omniPanelPlace
 import app.winters.octo.desktop.search.railFieldPlace
 import app.winters.octo.desktop.window.Frame
@@ -161,7 +176,6 @@ fun Shell(app: AppState, frame: Frame?, onClose: () -> Unit) {
     val focus = LocalFocusManager.current
     val connection = app.connection
     val key = rememberKeyColour(app)
-    KeepAccent(app)
     val keyboard = LocalFocusVisibility.current
     val parts = remember { FrameFocus() }
     // What had the keyboard before a pop-up opened gets it back after: the
@@ -182,7 +196,7 @@ fun Shell(app: AppState, frame: Frame?, onClose: () -> Unit) {
         Box(
             Modifier
                 .fillMaxSize()
-                .background(OctoColors.Background)
+                .background(if (connection == null) OverArtPage else OctoColors.Background)
                 // Where the pointer is, for menus, and the mouse's back and
                 // forward buttons, before anything else hears them.
                 .onPointerEvent(PointerEventType.Move, PointerEventPass.Initial) { pointer.position = it.changes.first().position }
@@ -206,30 +220,48 @@ fun Shell(app: AppState, frame: Frame?, onClose: () -> Unit) {
             val player = remember { MutableTransitionState(false) }
             player.targetState = connection != null && app.fullPlayer
             val covered = player.isIdle && player.currentState
+            // The title bar and the pop-ups sit over the full player (all the
+            // while it fades in or out) or the sign-in page's backdrop, which
+            // keep Octo's dark look in every theme.
+            val playerShows = player.currentState || player.targetState
+            val overArt = playerShows || connection == null
+            // While the full player shows, the pop-ups frost it, not the
+            // window's colours under it.
+            val playerBackdrop = rememberHazeState()
             val shown = LocalWindowShown.current && !covered
             CompositionLocalProvider(LocalWindowShown provides shown) {
                 // The colours the glass frosts. Only these: the page is not under
                 // glass, so scrolling never makes the frame blur again.
-                Box(Modifier.fillMaxSize().drawnUnless(covered).hazeSource(backdrop)) { AmbientGlow(app) }
+                Box(Modifier.fillMaxSize().drawnUnless(covered).hazeSource(backdrop)) { OverArt(enabled = connection == null) { AmbientGlow(app) } }
             }
             // Everything but the pop-ups, as one group the keyboard can come back to.
             Box(Modifier.fillMaxSize().focusRequester(parts.window).focusGroup()) {
                 if (connection == null) {
-                    // The sign-in card frosts the colours behind it.
-                    Box(Modifier.fillMaxSize().padding(top = FrameSize.TitleBar)) { SignInPage(app, backdrop) }
+                    // The sign-in card frosts the colours behind it. A
+                    // session on the defaults (its settings file held) opens
+                    // here, under its banner.
+                    Box(Modifier.fillMaxSize().padding(top = FrameSize.TitleBar)) {
+                        OverArt {
+                            Column(Modifier.fillMaxSize()) {
+                                SettingsBanners(app.settings, side = PageSide)
+                                Box(Modifier.weight(1f).fillMaxWidth()) { SignInPage(app, backdrop) }
+                            }
+                        }
+                    }
                 } else {
                     CompositionLocalProvider(LocalWindowShown provides shown) {
                         Box(Modifier.fillMaxSize().drawnUnless(covered)) { SignedInFrame(app, backdrop, parts) }
                     }
                     AnimatedVisibility(player, enter = fadeIn(motionFade()), exit = fadeOut(motionFade())) {
-                        FullPlayer(app, Modifier.fillMaxSize().part(parts, parts.full, app), top = FrameSize.TitleBar)
+                        OverArt { FullPlayer(app, Modifier.fillMaxSize().hazeSource(playerBackdrop).part(parts, parts.full, app), top = FrameSize.TitleBar) }
                     }
                 }
                 if (connection != null && app.omnibox.open && !app.fullPlayer) OmniboxOver(app, backdrop)
-                Box(Modifier.part(parts, parts.title, app)) { TitleBar(app, frame, onClose) }
+                OverArt(enabled = overArt) { Box(Modifier.part(parts, parts.title, app)) { TitleBar(app, frame, onClose) } }
             }
-            PopupLayer(app.popups, backdrop)
-            DragLabel(drag)
+            // A pop-up keeps the look it opened with until it closes.
+            OverArt(enabled = overArt) { HoldLook(app.popups.open) { PopupLayer(app.popups, if (playerShows && connection != null) playerBackdrop else backdrop) } }
+            OverArt(enabled = connection == null) { DragLabel(drag) }
             if (frame != null) ResizeEdges(frame)
         }
     }
@@ -255,7 +287,7 @@ internal class FrameFocus {
 
     fun order(app: AppState): List<FocusRequester> = when {
         app.fullPlayer -> listOf(title, full)
-        app.sidePanel != null -> listOf(title, sidebar, page, panel, player)
+        app.shownPanel != null -> listOf(title, sidebar, page, panel, player)
         else -> listOf(title, sidebar, page, player)
     }
 }
@@ -272,6 +304,83 @@ internal fun Modifier.part(parts: FrameFocus, me: FocusRequester, app: AppState)
 // Draws nothing while `hidden`, keeping what is inside composed and laid out.
 private fun Modifier.drawnUnless(hidden: Boolean): Modifier = drawWithContent { if (!hidden) drawContent() }
 
+// How long the sidebar and Settings' list take to trade places.
+private const val SettingsSwapMs = 360
+
+// How far the sidebar's place has gone over to Settings' list: 0 the app's
+// sidebar, 1 the list, between while they trade places. With motion
+// reduced, by Calm motion or the system, they swap at once.
+@Composable
+private fun settingsSwap(inSettings: Boolean): Float {
+    val target = if (inSettings) 1f else 0f
+    val still = LocalReduceMotion.current
+    val swap = remember { Animatable(target) }
+    LaunchedEffect(target, still) {
+        if (still) swap.snapTo(target) else swap.animateTo(target, tween(SettingsSwapMs, easing = OctoEasing.Spring))
+    }
+    return if (still) target else swap.value
+}
+
+// One face of the sidebar's place, slid `shift` across and drawn at
+// `alpha`. The face on its way out is only drawn: a screen reader, the
+// keyboard and the pointer pass it by.
+private fun Modifier.face(shift: Float, alpha: Float, leaving: Boolean): Modifier = this
+    .graphicsLayer {
+        translationX = shift
+        this.alpha = alpha
+    }
+    .then(
+        if (leaving) {
+            Modifier
+                .clearAndSetSemantics { }
+                .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() } } }
+                .focusProperties { onEnter = { cancelFocusChange() } }
+                .focusGroup()
+        } else {
+            Modifier
+        },
+    )
+
+// Where the keyboard goes as Settings takes the sidebar's place or gives it
+// back: from the sidebar or the side panel to the page shown in Settings'
+// list, and from the list back to the sidebar's Settings row (or its Sound
+// row, while Settings shows Sound).
+@Stable
+internal class SlotFocus {
+    val chosen = FocusRequester()
+    val settingsRow = FocusRequester()
+    val soundRow = FocusRequester()
+
+    // Whether the keyboard is in the sidebar's place, or in the side panel.
+    var inSlot = false
+    var inPanel = false
+
+    private var was: Boolean? = null
+    private var next: FocusRequester? = null
+
+    // Called as the frame is composed, before either face changes, so the
+    // keyboard's place is read from before the swap.
+    fun swapped(inSettings: Boolean, page: String) {
+        val before = was
+        was = inSettings
+        if (before == null || before == inSettings) return
+        next = when {
+            inSettings && (inSlot || inPanel) -> chosen
+            !inSettings && inSlot -> if (page == SettingsKey.Sound) soundRow else settingsRow
+            else -> null
+        }
+        inPanel = false
+    }
+
+    // Moves the keyboard once the face it goes to is there.
+    suspend fun handOff() {
+        val to = next ?: return
+        next = null
+        withFrameNanos { }
+        runCatching { to.requestFocus() }
+    }
+}
+
 // The full player's fade: brief, and briefer still with motion reduced.
 @Composable
 private fun motionFade() = tween<Float>(motionScale().ms(OctoDuration.Neutral))
@@ -285,7 +394,8 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
     var sidebar by remember { mutableStateOf(saved.sidebarWidth.dp) }
     var panelWidth by remember { mutableStateOf(saved.panelWidth.dp) }
     val shade = rememberPageShade(app)
-    val panel = app.sidePanel
+    // Settings draws no side panel; the one open comes back on leaving it.
+    val panel = app.shownPanel
     LaunchedEffect(panel) {
         if (panel == null && app.panelHasKeyboard) {
             app.panelHasKeyboard = false
@@ -300,6 +410,22 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
         saved.sidebarRail,
         if (panel != null) panelWidth.coerceIn(FrameSize.PanelMin, FrameSize.PanelMax) else null,
     )
+    // Settings puts its list in the sidebar's place, as wide as the sidebar
+    // unless its names need more; the two slide past each other as they
+    // trade places, and the slot's width, the page's left edge and the
+    // player go with them.
+    val inSettings = app.inSettings
+    val listFit = settingsFit(window, fit.sidebar, settingsListNeeds(app))
+    val shown = if (inSettings) listFit else fit
+    val swap = settingsSwap(inSettings)
+    val slot = lerp(fit.sidebar, listFit.sidebar, swap)
+    val swapping = swap > 0f && swap < 1f
+    val shift = with(LocalDensity.current) { SettingsSize.SwapShift.toPx() }
+    // The sidebar keeps its place in its list while Settings is open.
+    val sidebarList = rememberLazyListState()
+    val handOff = remember { SlotFocus() }
+    handOff.swapped(inSettings, app.settingsUi.page)
+    LaunchedEffect(inSettings) { handOff.handOff() }
     // Under the full player the frame is out of a screen reader's reach too.
     Column(Modifier.fillMaxSize().then(if (app.fullPlayer) Modifier.clearAndSetSemantics { } else Modifier)) {
         // Room for the title bar, in the frame's glass; its buttons are drawn
@@ -308,14 +434,33 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
         Seam(vertical = false)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             Row(Modifier.fillMaxSize()) {
-                Box(Modifier.width(fit.sidebar).fillMaxHeight().part(parts, parts.sidebar, app)) {
-                    Sidebar(app, backdrop, Modifier.fillMaxSize(), rail = fit.rail)
-                    if (!fit.rail) {
-                        ResizeHandle(
-                            onDrag = { sidebar = (sidebar + it).coerceIn(FrameSize.SidebarMin, FrameSize.SidebarMax) },
-                            onDone = { app.updateFrame { f -> f.copy(sidebarWidth = sidebar.value) } },
-                            modifier = Modifier.align(Alignment.CenterEnd),
-                        )
+                Box(
+                    Modifier
+                        .width(slot)
+                        .fillMaxHeight()
+                        .clipToBounds()
+                        .chromeFilm(backdrop)
+                        .onFocusChanged { handOff.inSlot = it.hasFocus }
+                        .part(parts, parts.sidebar, app),
+                ) {
+                    // Each face is laid out at its own width, so nothing in
+                    // it wraps anew while the slot changes width.
+                    if (!inSettings || swap < 1f) {
+                        Box(Modifier.fillMaxHeight().wrapContentWidth(Alignment.Start, unbounded = true).width(fit.sidebar).face(-shift * swap, 1f - swap, leaving = inSettings)) {
+                            Sidebar(app, backdrop, Modifier.fillMaxSize(), rail = fit.rail, list = sidebarList, film = false, settingsRow = handOff.settingsRow, soundRow = handOff.soundRow)
+                        }
+                        if (!fit.rail && !inSettings && swap == 0f) {
+                            ResizeHandle(
+                                onDrag = { sidebar = (sidebar + it).coerceIn(FrameSize.SidebarMin, FrameSize.SidebarMax) },
+                                onDone = { app.updateFrame { f -> f.copy(sidebarWidth = sidebar.value) } },
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                            )
+                        }
+                    }
+                    if (inSettings || swap > 0f) {
+                        Box(Modifier.fillMaxHeight().wrapContentWidth(Alignment.Start, unbounded = true).width(listFit.sidebar).face(shift * (1f - swap), swap, leaving = !inSettings)) {
+                            SettingsList(app, handOff.chosen, live = inSettings, modifier = Modifier.fillMaxSize())
+                        }
                     }
                 }
                 Seam(vertical = true)
@@ -334,7 +479,12 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
                                 .pageShade(shade, FrameSize.TitleBar + FrameSize.Hairline)
                                 .part(parts, parts.page, app),
                         ) {
-                            Box(Modifier.weight(1f)) { PageHost(app) }
+                            // While the slot changes width, the page keeps the width it
+                            // ends at and its right edge, so its words never wrap anew.
+                            val page = if (swapping) Modifier.wrapContentWidth(Alignment.End, unbounded = true).width(shown.page) else Modifier.fillMaxWidth()
+                            // The settings file's banners, over every page while they apply.
+                            SettingsBanners(app.settings, page, side = PageSide)
+                            Box(Modifier.weight(1f).then(page)) { PageHost(app) }
                         }
                         // The notice floats over the page, above the player, so its coming and
                         // going never moves the page.
@@ -357,7 +507,10 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
                         Modifier
                             .width(fit.panel)
                             .fillMaxHeight()
-                            .onFocusChanged { app.panelHasKeyboard = it.hasFocus }
+                            .onFocusChanged {
+                                app.panelHasKeyboard = it.hasFocus
+                                handOff.inPanel = it.hasFocus
+                            }
                             .part(parts, parts.panel, app),
                     ) {
                         ContextPanel(app, panel, backdrop, Modifier.fillMaxSize())
@@ -371,16 +524,18 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
             }
             // The player floats over the foot of the page, a third of the window
             // wide in its middle. It is laid out after the side panel, so Tab
-            // comes to it last, after the panel.
-            val start = fit.sidebar + FrameSize.Hairline
-            val end = fit.panel?.let { it + FrameSize.Hairline } ?: Space.None
+            // comes to it last, after the panel. While Settings and the sidebar
+            // trade places it moves with the slot's edge to where it ends.
+            val start = slot + FrameSize.Hairline
+            val end = shown.panel?.let { it + FrameSize.Hairline } ?: Space.None
             Box(Modifier.fillMaxSize().padding(start = start, end = end)) {
-                val width = playerWidth(fit.page, window)
-                PlayerBar(app, backdrop, Modifier.align(Alignment.BottomCenter).padding(bottom = FrameSize.PlayerGap).width(width).height(FrameSize.Player).part(parts, parts.player, app), compact = playerIsCompact(width))
+                val ends = playerWidth(shown.page, window)
+                val width = lerp(playerWidth(fit.page, window), playerWidth(listFit.page, window), swap)
+                PlayerBar(app, backdrop, Modifier.align(Alignment.BottomCenter).padding(bottom = FrameSize.PlayerGap).width(width).height(FrameSize.Player).part(parts, parts.player, app), compact = playerIsCompact(ends))
                 // Songs on their way: a small pill at the page's foot, level
                 // with the player where there is room beside it, else just
                 // above it, so it never covers the player.
-                val beside = (fit.page - width) / 2 >= DownloadsPillRoom
+                val beside = (shown.page - ends) / 2 >= DownloadsPillRoom
                 val pillBottom = if (beside) FrameSize.PlayerGap + (FrameSize.Player - DownloadsPillHeight) / 2 else FrameSize.PlayerGap + FrameSize.Player + Space.M
                 DownloadsPill(app, backdrop, Modifier.align(Alignment.BottomEnd).padding(end = Space.Page, bottom = pillBottom))
             }
@@ -391,13 +546,14 @@ private fun SignedInFrame(app: AppState, backdrop: HazeState, parts: FrameFocus)
 // What the open search box lays over the page: its list, under the field
 // and lined up with its start, reaching over the page as far as the window
 // allows. With the sidebar folded to a rail, the field floats beside the
-// rail's search button too.
+// rail's search button too, and beside Settings' title while its list
+// holds the sidebar's place.
 @Composable
 private fun OmniboxOver(app: AppState, backdrop: HazeState) {
     val box = app.omnibox
     val density = LocalDensity.current
     val window = LocalWindowInfo.current.containerSize.width
-    // The rail's search button marks where it is while the rail shows.
+    // The rail's search button, or Settings' title, marks where it is.
     if (box.trigger != IntRect.Zero) {
         val gap = with(density) { Space.M.roundToPx() }
         val inset = with(density) { Space.Xs.roundToPx() }
@@ -437,8 +593,11 @@ private fun TitleBar(app: AppState, frame: Frame?, onClose: () -> Unit) {
     TitleStrip {
         if (app.mac) Spacer(Modifier.width(MacLightsRoom)) else Spacer(Modifier.width(Space.M))
         if (app.connection != null) {
-            IconAction(OctoIcons.Back, "Back", { app.navigator.back() }, size = ControlHeight.S, iconSize = IconSize.Toolbar, enabled = app.navigator.canGoBack, tint = ink ?: Color.White)
-            IconAction(OctoIcons.Forward, "Forward", { app.navigator.forward() }, size = ControlHeight.S, iconSize = IconSize.Toolbar, enabled = app.navigator.canGoForward, tint = ink ?: Color.White)
+            // In Settings it is always the way out, to Home when Settings
+            // was the first page shown.
+            val back = { if (app.inSettings) app.leaveSettings() else app.navigator.back() }
+            IconAction(OctoIcons.Back, "Back", { back() }, size = ControlHeight.S, iconSize = IconSize.Toolbar, enabled = app.inSettings || app.navigator.canGoBack, tint = ink ?: OctoColors.TextPrimary)
+            IconAction(OctoIcons.Forward, "Forward", { app.navigator.forward() }, size = ControlHeight.S, iconSize = IconSize.Toolbar, enabled = app.navigator.canGoForward, tint = ink ?: OctoColors.TextPrimary)
             val settings by app.settings.state.collectAsState()
             IconAction(
                 OctoIcons.Library,
@@ -447,7 +606,7 @@ private fun TitleBar(app: AppState, frame: Frame?, onClose: () -> Unit) {
                 size = ControlHeight.S,
                 iconSize = IconSize.Toolbar,
                 active = settings.libraryOnly,
-                tint = ink ?: Color.White,
+                tint = ink ?: OctoColors.TextPrimary,
                 toggled = settings.libraryOnly,
             )
         }
@@ -519,7 +678,6 @@ private fun PageHost(app: AppState) {
             Page.Family -> FamilyPage(app, visit)
             Page.LiveRadio -> LiveRadioPage(app, visit)
             Page.Settings -> SettingsPage(app, visit)
-            Page.Sound -> SoundPage(app, visit)
             is Page.Album -> AlbumPage(app, visit, page.id)
             is Page.Artist -> ArtistPage(app, visit, page.id, page.name)
             is Page.Genre -> GenrePage(app, visit, page.name)
@@ -533,11 +691,13 @@ private fun PageHost(app: AppState) {
 }
 
 // The key colour: the main colour of the playing song's cover, or Octo's
-// own while nothing with a cover plays.
+// own while nothing with a cover plays, in the theme's form for it. The
+// sign-in, drawn in Octo's dark look, keeps it as it is.
 @Composable
 private fun rememberKeyColour(app: AppState): Color {
     val state by app.player.state.collectAsState()
     val settings by app.settings.state.collectAsState()
+    val palette by app.palette.collectAsState()
     val coverId = state.current?.song?.coverArt
     val connection = app.connection
     val wash = settings.appearance.wash
@@ -546,42 +706,40 @@ private fun rememberKeyColour(app: AppState): Color {
         if (coverId == null || connection == null) value = OctoKey
         else app.washCovers.follow(connection.client, coverId, tuning).collect { value = it.keyColour() }
     }
-    return key
+    return if (connection == null) key else Color(keyForTheme(palette.theme, key.toArgb()))
 }
 
 // The window's colours, behind everything. The glow: a soft wash of the
 // playing song's colours across the top of the window, its cover blurred
 // far past recognition and kept faint. Garnish, and off when the listener
-// turns it off. With no cover to show, Octo's own colours stand in, still
-// and very dim, so the glass has something behind it. Before signing in
-// they move, behind the sign-in card. Immersive instead lays the full
-// player's moving wash behind the whole window.
+// turns it off. With no cover to show, Octo's own colours (or the theme's,
+// in a theme with its own) stand in, still and very dim, so the glass has
+// something behind it. Before signing in Octo's move, behind the sign-in
+// card. Immersive instead lays the full player's moving wash behind the
+// whole window. On a light theme a veil of the page colour lies over the
+// cover's glow, as far as the words need.
 @Composable
 private fun BoxScope.AmbientGlow(app: AppState) {
     val settings by app.settings.state.collectAsState()
     val look = settings.appearance
     val state by app.player.state.collectAsState()
     val cover = state.current?.song?.coverArt
-    if (app.connection == null) {
-        OctoAmbience(app, moving = true, veil = 0.2f)
-        return
+    val shown = windowGlow(look, app.connection != null, cover)
+    val veil = rememberGlowVeil(app, cover.takeIf { shown == WindowGlow.Cover })
+    when (shown) {
+        WindowGlow.SignIn -> OctoAmbience(app, moving = true, veil = 0.2f)
+        WindowGlow.None -> Unit
+        WindowGlow.Immersive -> ImmersiveAmbience(app)
+        WindowGlow.Quiet -> OctoAmbience(app, moving = false, veil = 1f - quietOpacity(look.glowStrength))
+        WindowGlow.Cover -> if (cover != null) CoverGlow(look.glowStrength, veil) { blurred -> Cover(cover, blurred, shape = RectangleShape) }
     }
-    if (!look.ambientGlow) return
-    if (look.ambience == AmbienceStyle.Immersive) {
-        ImmersiveAmbience(app)
-        return
-    }
-    if (cover == null) {
-        OctoAmbience(app, moving = false, veil = 1f - quietOpacity(look.glowStrength))
-        return
-    }
-    CoverGlow(look.glowStrength) { blurred -> Cover(cover, blurred, shape = RectangleShape) }
 }
 
 // The glow itself: `picture` draws the cover into the blurred modifier it
-// is given, faint and fading into the page below.
+// is given, faint and fading into the page below, with `veil` of the page
+// colour over it.
 @Composable
-internal fun CoverGlow(strength: Float, picture: @Composable (Modifier) -> Unit) {
+internal fun CoverGlow(strength: Float, veil: Float = 0f, picture: @Composable (Modifier) -> Unit) {
     Box(
         Modifier
             .fillMaxWidth()
@@ -589,6 +747,7 @@ internal fun CoverGlow(strength: Float, picture: @Composable (Modifier) -> Unit)
             .alpha(glowOpacity(strength)),
     ) {
         picture(Modifier.fillMaxSize().blur(Ambience.Blur, BlurredEdgeTreatment.Unbounded))
+        if (veil > 0f) Box(Modifier.fillMaxSize().alpha(veil).background(OctoColors.Background))
         // Fades into the page below, so there is no edge.
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, OctoColors.Background))))
     }

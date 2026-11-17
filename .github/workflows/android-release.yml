@@ -50,7 +50,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 25
 
       - name: Build number
         run: echo "OCTO_BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
@@ -110,3 +110,11 @@ jobs:
     secrets:
       OCTO_RELEASES_TOKEN: ${{ secrets.OCTO_RELEASES_TOKEN }}
       OCTO_UPDATE_SIGNING_KEY: ${{ secrets.OCTO_UPDATE_SIGNING_KEY }}
+
+  mirror:
+    needs: publish
+    permissions:
+      contents: write
+    uses: ./.github/workflows/mirror-player-release.yml
+    with:
+      tag: ${{ github.ref_name }}

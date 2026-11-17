@@ -2,6 +2,7 @@
 //! an `Engine` object, the records it takes and gives, and the events it
 //! sends to a listener.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -17,12 +18,22 @@ use crate::pace::Pace;
 use crate::player::{Command, Driven, Shared};
 use crate::sound::model::{DspSettings, EqPreset, EqSettings, ReplayGainSettings};
 use crate::sound::replaygain::ReplayGainInfo;
+use crate::source::trust::{Identity, identity_problem};
 
 /// An extra request header for a stream, such as one a server's proxy needs.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+/// The value can be a password, so it is never shown: `Debug`, and the
+/// Kotlin `toString` made from it, give the name alone.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::export(Debug)]
 pub struct HttpHeader {
     pub name: String,
     pub value: String,
+}
+
+impl fmt::Debug for HttpHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpHeader").field("name", &self.name).finish_non_exhaustive()
+    }
 }
 
 /// A certificate the listener chose to trust for one host, although the
@@ -31,8 +42,41 @@ pub struct HttpHeader {
 pub struct TrustedCertificate {
     /// The host's name or address, in any case.
     pub host: String,
-    /// The SHA-256 of the certificate itself, in hex; colons and spaces are ignored.
+    /// The pin: `spki:` and the SHA-256 of the certificate's public key, or the SHA-256 of the whole certificate, in hex; colons and spaces are ignored.
     pub sha256: String,
+}
+
+/// A server's scheme, host and port, to which a client certificate is
+/// offered. An IPv6 host may be written in brackets, as in an address.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Origin {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+}
+
+/// A client certificate the engine offers to the origins named with it
+/// when one asks, and to no other server. The key is secret, so it is
+/// never shown: `Debug`, and the Kotlin `toString` made from it, give the
+/// origins and the number of certificates alone.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+#[uniffi::export(Debug)]
+pub struct ClientCertificate {
+    pub origins: Vec<Origin>,
+    /// The certificates, each in DER: the client's own first, then any
+    /// that issued it.
+    pub chain: Vec<Vec<u8>>,
+    /// The private key as PKCS#8 DER.
+    pub key: Vec<u8>,
+}
+
+impl fmt::Debug for ClientCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientCertificate")
+            .field("origins", &self.origins)
+            .field("chain", &self.chain.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One entry in the play queue.
@@ -58,6 +102,12 @@ pub struct QueueItem {
     pub replay_gain: Option<ReplayGainInfo>,
     #[uniffi(default)]
     pub headers: Vec<HttpHeader>,
+    /// More headers, such as a gateway's sign-in, sent on top of `headers`
+    /// only over https to the song's own server (its address, or the https
+    /// address an http one moves up to on the same host at port 443), never
+    /// over plain http and never to another server.
+    #[uniffi(default)]
+    pub secure_headers: Vec<HttpHeader>,
     /// The song's genre; some genres are never mixed into the next song.
     #[uniffi(default)]
     pub genre: Option<String>,
@@ -340,11 +390,13 @@ impl Engine {
     }
 
     /// How crossfades are chosen and shaped: smart transitions, filter
-    /// sweeps, tempo matching and the longest blend. Applies from the next
-    /// transition on. Smart transitions are off until this is called.
+    /// sweeps, tempo matching, the longest blend and the longest intro.
+    /// Applies from the next transition on. Smart transitions are off until
+    /// this is called.
     pub fn set_automix(&self, settings: AutomixSettings) -> Result<(), EngineError> {
         let max_overlap_ms = settings.max_overlap_ms.min(crate::crossfade::LONGEST_FADE_MS);
-        self.send(Command::SetAutomix(AutomixSettings { max_overlap_ms, ..settings }))
+        let longest_intro_ms = settings.longest_intro_ms.min(crate::automix::AUTOMIX_LONGEST_INTRO_MS as u32);
+        self.send(Command::SetAutomix(AutomixSettings { max_overlap_ms, longest_intro_ms, ..settings }))
     }
 
     /// The transition profile of the song queued as `item_id`, from its
@@ -453,9 +505,32 @@ impl Engine {
     /// Replaces the certificates trusted for streams. A server's certificate
     /// is checked the system's way first; only when that fails is it let
     /// through, and only when its host has a pin equal to its SHA-256.
-    /// Applies to connections made from now on.
+    /// Applies from the next connection on: one made before is not used
+    /// again.
     pub fn set_trusted_certificates(&self, certificates: Vec<TrustedCertificate>) {
         self.shared.trust.replace(certificates.into_iter().map(|c| (c.host, c.sha256)));
+    }
+
+    /// Offers this client certificate, from the next connection on, to the
+    /// origins it names when one asks, and to no other server; `None` offers
+    /// none. A connection made before is not used again. One the engine
+    /// could not present (see `client_identity_problem`) is refused: none is
+    /// offered then, and the error says why.
+    pub fn set_client_certificate(&self, certificate: Option<ClientCertificate>) -> Result<(), EngineError> {
+        let identity = certificate.map(|c| {
+            let origins = c.origins.into_iter().map(|o| (o.scheme, o.host, o.port));
+            Identity::new(origins, c.chain, c.key)
+        });
+        match identity.transpose() {
+            Ok(identity) => {
+                self.shared.trust.set_identity(identity);
+                Ok(())
+            }
+            Err(problem) => {
+                self.shared.trust.set_identity(None);
+                Err(invalid(&problem))
+            }
+        }
     }
 
     /// Sends a `Position` event every `ms` while playing; 0 turns it off.
@@ -485,9 +560,18 @@ impl Engine {
     /// An engine with a chosen way to reach devices. The driver is made on
     /// the engine's thread, since device streams may not move between threads.
     pub fn with_driver(make_driver: Box<dyn FnOnce() -> Box<dyn crate::output::Driver> + Send>) -> Arc<Self> {
+        Self::with_driver_counting(make_driver, &crate::live::TRACK_INFOS)
+    }
+
+    /// As `with_driver`, counting the track infos its player holds in
+    /// `track_infos`.
+    pub fn with_driver_counting(
+        make_driver: Box<dyn FnOnce() -> Box<dyn crate::output::Driver> + Send>,
+        track_infos: &'static std::sync::atomic::AtomicI64,
+    ) -> Arc<Self> {
         let (commands, command_rx) = unbounded();
         let (event_tx, event_rx) = unbounded::<EngineEvent>();
-        let shared = Arc::new(Shared::new());
+        let shared = Arc::new(Shared::counting(track_infos));
         let events_shared = shared.clone();
         let events = thread::Builder::new()
             .name("octo-events".into())
@@ -536,6 +620,14 @@ impl Engine {
         *self.shared.planner.lock().unwrap_or_else(|e| e.into_inner()) = planner;
     }
 
+    /// Holds every scout of this engine unfinished, so each transition is
+    /// decided at its deadline.
+    #[cfg(test)]
+    pub fn hold_scouts(&self, held: bool) {
+        self.shared.scouts_held.store(held, std::sync::atomic::Ordering::Relaxed);
+        self.shared.wake();
+    }
+
     /// How many track infos the player holds.
     #[cfg(test)]
     pub fn infos_len(&self) -> usize {
@@ -572,4 +664,14 @@ pub fn equalizer_presets() -> Vec<EqPreset> {
 #[uniffi::export]
 pub fn graphic_bands() -> Vec<f32> {
     crate::sound::model::GRAPHIC_BANDS.to_vec()
+}
+
+/// Why the engine could not present a client certificate with this chain
+/// (each in DER, the client's own first) and this PKCS#8 DER key, or `None`
+/// when it can. It signs with RSA of at least 2048 bits, P-256 or P-384
+/// (the key carrying its public key) and Ed25519, and the key must be the
+/// one the first certificate names.
+#[uniffi::export]
+pub fn client_identity_problem(chain: Vec<Vec<u8>>, key: Vec<u8>) -> Option<String> {
+    identity_problem(&chain, &key)
 }

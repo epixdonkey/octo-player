@@ -68,18 +68,30 @@ import androidx.navigation3.runtime.NavKey
 import app.winters.octo.design.OctoColors
 import app.winters.octo.design.OctoIcons
 import app.winters.octo.design.OctoType
+import app.winters.octo.catalog.TrackEntity
 import app.winters.octo.livelists.liveListQueryFrom
+import app.winters.octo.playback.ListSpec
+import app.winters.octo.sort.SongScope
 import app.winters.octo.sort.SortList
+import app.winters.octo.sort.SortOrder
 import app.winters.octo.sort.Sorted
+import app.winters.octo.ui.common.LetterHeading
+import app.winters.octo.ui.common.picked
+import app.winters.octo.ui.paging.ListHandle
+import app.winters.octo.ui.paging.PagedPicks
+import app.winters.octo.ui.paging.RowPlaceholder
+import app.winters.octo.ui.paging.listRows
+import app.winters.octo.ui.paging.rememberListRows
 import app.winters.octo.ui.common.ScreenTitle
 import app.winters.octo.ui.common.AlbumCard
 import app.winters.octo.ui.common.ArtistRow
+import app.winters.octo.ui.common.CopyNote
 import app.winters.octo.ui.common.EmptyLibraryNote
 import app.winters.octo.ui.common.GlassIconButton
 import app.winters.octo.ui.common.LetterRail
 import app.winters.octo.ui.common.LocalReduceMotion
 import app.winters.octo.ui.common.Pickable
-import app.winters.octo.ui.common.LetterRailWidth
+import app.winters.octo.ui.common.letterRailRoom
 import app.winters.octo.ui.common.railShows
 import app.winters.octo.ui.common.Refreshable
 import app.winters.octo.ui.common.SectionTitle
@@ -91,6 +103,8 @@ import app.winters.octo.ui.common.TopOnNewOrder
 import app.winters.octo.ui.common.letterRuns
 import app.winters.octo.ui.common.letteredRows
 import app.winters.octo.ui.common.railStops
+import app.winters.octo.ui.common.railLetterAt
+import androidx.compose.runtime.derivedStateOf
 import app.winters.octo.ui.common.screenPadding
 import app.winters.octo.ui.common.sortedRows
 import app.winters.octo.ui.nav.AlbumRoute
@@ -120,10 +134,10 @@ private val sections = listOf(
     Section(OctoIcons.Songs, "Songs", SongsRoute),
     Section(OctoIcons.Genres, "Genres", GenresRoute),
     Section(OctoIcons.Folder, "Folders", FoldersRoute),
-    Section(OctoIcons.Downloaded, "Downloads", DownloadsRoute),
+    Section(OctoIcons.Download, "Downloads", DownloadsRoute),
     // Stands in until the history symbol joins the icon set.
     Section(OctoIcons.History, "History", HistoryRoute()),
-    Section(OctoIcons.Check, "Library health", LibraryHealthRoute),
+    Section(OctoIcons.Select, "Library health", LibraryHealthRoute),
 )
 
 // The library's front page: a menu of ways in, then the newest albums,
@@ -153,10 +167,10 @@ fun LibraryScreen(
                 item(key = "server-downloads") {
                     Column {
                         Separator()
-                        val running = app.winters.octo.ui.downloads.runningCount(serverRows)
+                        // "2 on the way, 1 waits for you".
                         SectionRow(
                             Section(OctoIcons.Cloud, app.winters.octo.ui.downloads.SERVER_DOWNLOADS, LibraryRoute),
-                            detail = if (running > 0) "$running on the way" else null,
+                            detail = app.winters.octo.ui.downloads.drawerState(serverRows),
                         ) { server.downloads.open() }
                     }
                 }
@@ -218,7 +232,7 @@ fun AlbumsScreen(onOpen: (NavKey) -> Unit, onBack: () -> Unit, vm: LibraryViewMo
         "Albums",
         onBack,
         count = listCount(albums, "album"),
-        lead = listOfNotNull(albums?.let { sortItem(SortList.Albums, it.order, { order -> vm.setOrder(SortList.Albums, order) }) }),
+        lead = listOfNotNull(albums?.takeIf { it.items.isNotEmpty() }?.let { sortItem(SortList.Albums, it.order, { order -> vm.setOrder(SortList.Albums, order) }) }),
         tail = playItems(albums, vm::playAlbums),
         more = if (albums?.items.isNullOrEmpty()) {
             emptyList()
@@ -245,7 +259,8 @@ fun AlbumsScreen(onOpen: (NavKey) -> Unit, onBack: () -> Unit, vm: LibraryViewMo
                 }
                 if (rail && names != null) {
                     val stops = remember(names) { railStops(letterRuns(names), headed = false) }
-                    LetterRail(stops, onJump = { grid.requestScrollToItem(it) }, modifier = Modifier.fillMaxSize().padding(RailPadding))
+                    val current by remember(stops, grid) { derivedStateOf { railLetterAt(stops, grid.firstVisibleItemIndex) } }
+                    LetterRail(stops, current, onJump = { grid.requestScrollToItem(it) }, modifier = Modifier.fillMaxSize().padding(RailPadding))
                 }
             }
         }
@@ -260,7 +275,7 @@ fun ArtistsScreen(onOpen: (NavKey) -> Unit, onBack: () -> Unit, vm: LibraryViewM
         "Artists",
         onBack,
         count = listCount(artists, "artist"),
-        lead = listOfNotNull(artists?.let { sortItem(SortList.Artists, it.order, { order -> vm.setOrder(SortList.Artists, order) }) }),
+        lead = listOfNotNull(artists?.takeIf { it.items.isNotEmpty() }?.let { sortItem(SortList.Artists, it.order, { order -> vm.setOrder(SortList.Artists, order) }) }),
         tail = playItems(artists, vm::playArtists),
     ) {
         Loaded(artists) { sorted ->
@@ -275,10 +290,13 @@ fun ArtistsScreen(onOpen: (NavKey) -> Unit, onBack: () -> Unit, vm: LibraryViewM
 // tap plays the list as shown from that song.
 @Composable
 fun SongsScreen(onBack: () -> Unit, onOpen: (NavKey) -> Unit = {}, vm: LibraryViewModel = hiltViewModel()) {
-    val songs by vm.songs.collectAsStateWithLifecycle()
-    val shown by vm.shownSongs.collectAsStateWithLifecycle()
+    val handle by vm.songs.collectAsStateWithLifecycle()
+    val order by vm.songOrder.collectAsStateWithLifecycle()
+    val meta by vm.songMeta.collectAsStateWithLifecycle()
+    val total by vm.songTotal.collectAsStateWithLifecycle()
     val query by vm.songFilter.collectAsStateWithLifecycle()
     val choices by vm.songChoices.collectAsStateWithLifecycle()
+    val shuffleWaiting by vm.shuffleWaiting.collectAsStateWithLifecycle()
     // Search opens from the title's line and stays open while it narrows the
     // list. Closing it (its button, or Back) clears the words and the chips.
     var searchOpen by rememberSaveable { mutableStateOf(false) }
@@ -294,8 +312,9 @@ fun SongsScreen(onBack: () -> Unit, onOpen: (NavKey) -> Unit = {}, vm: LibraryVi
         vm.filterSongs(query.cleared())
     }
     BackHandler(enabled = searching) { closeSearch() }
-    val all = songs?.items?.size ?: 0
-    val count = if (query.filters) filteredCount(shown?.items?.size ?: 0, all) else listCount(songs, "song")
+    // A filter's count shows once its pass has counted it.
+    val shownCount = meta?.count
+    val count = if (query.filters) shownCount?.let { filteredCount(it, total) } else shownCount?.takeIf { it > 0 }?.let { songCountLine(it) }
     val toggleSearch = {
         if (searching) {
             closeSearch()
@@ -305,11 +324,12 @@ fun SongsScreen(onBack: () -> Unit, onOpen: (NavKey) -> Unit = {}, vm: LibraryVi
         }
     }
     val searchWords = if (searching) "Close the search" else "Search these songs"
-    // The sort first, then Search; the sort is the first to move into More
-    // on a narrow phone, then Search.
+    // The sort first, then Search, both once there is something to sort;
+    // the sort is the first to move into More on a narrow phone, then Search.
+    val known = order
     val lead = listOfNotNull(
-        songs?.let { sortItem(SortList.Songs, it.order, { order -> vm.setOrder(SortList.Songs, order) }) },
-        if (songs?.items?.isNotEmpty() == true) {
+        known?.takeIf { total > 0 }?.let { sortItem(SortList.Songs, it, { next -> vm.setOrder(SortList.Songs, next) }) },
+        if (total > 0) {
             LineItem("search", overflow = 1, more = MoreItem(searchWords, if (searching) OctoIcons.Close else OctoIcons.Search, onClick = toggleSearch)) { _ ->
                 GlassIconButton(if (searching) OctoIcons.Close else OctoIcons.Search, searchWords, onClick = toggleSearch, lit = searching)
             }
@@ -317,33 +337,64 @@ fun SongsScreen(onBack: () -> Unit, onOpen: (NavKey) -> Unit = {}, vm: LibraryVi
             null
         },
     )
-    LibraryPage("Songs", onBack, count = count, lead = lead, tail = playItems(shown, vm::playSongs), panel = {
-        if (songs != null) {
+    val playable = (meta?.count ?: meta?.shown ?: 0) > 0
+    LibraryPage("Songs", onBack, count = count, lead = lead, tail = if (playable) playShuffleItems({ vm.playSongs(false) }, { vm.playSongs(true) }, shuffling = shuffleWaiting) else emptyList(), panel = {
+        if (known != null) {
             SearchPanel(searching) {
                 SongFilterRow(
                     query,
                     choices,
                     vm::filterSongs,
-                    onSaveAsLive = { onOpen(LiveListEditRoute(start = liveListQueryFrom(emptyList(), query, songs?.order))) },
+                    onSaveAsLive = { onOpen(LiveListEditRoute(start = liveListQueryFrom(emptyList(), query, known))) },
                     focusOnOpen = focusOnOpen,
                     onFocused = { focusOnOpen = false },
                 )
             }
         }
     }) {
-        Loaded(songs) { _ ->
-            val list = shown
-            when {
-                list == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = OctoColors.Accent, modifier = Modifier.size(28.dp))
+        val list = handle
+        when {
+            list == null || known == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = OctoColors.Accent, modifier = Modifier.size(28.dp))
+            }
+            total == 0 -> CopyNote { EmptyLibraryNote() }
+            meta?.count == 0 && query.filters -> NoMatchesNote { vm.filterSongs(query.cleared()) }
+            else -> PagedSongs(list, known, vm)
+        }
+    }
+}
+
+// "2,835 songs".
+private fun songCountLine(count: Int) = "%,d %s".format(count, if (count == 1) "song" else "songs")
+
+// The Songs list in pages, under letter headings with the letter rail when
+// its order is by name. Rows not read yet keep their place; a jump on the
+// rail reads around where it lands.
+@Composable
+private fun PagedSongs(handle: ListHandle<SongsQuestion, TrackEntity>, order: SortOrder, vm: LibraryViewModel) {
+    val state = rememberLazyListState()
+    TopOnNewOrder(order, state)
+    val meta by handle.shown.collectAsStateWithLifecycle()
+    val runs = meta?.runs
+    val items = rememberListRows(handle, state, runs = runs, visible = vm::visible)
+    val rail = railShows(runs != null, meta?.count ?: 0)
+    val asked by handle.asked.collectAsStateWithLifecycle()
+    PagedPicks(
+        handle,
+        items,
+        pickOf = { key, item -> if (item.row.id == key) Pickable(key, item.row, item.key).picked() else null },
+        base = ListSpec.Songs(SongScope.All, asked.order, asked.filter.takeIf { it.filters }),
+    ) {
+        Box(Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = rowsPadding(rail)) {
+                listRows(items, runs, heading = { LetterHeading(it) }) { item ->
+                    if (item == null) RowPlaceholder() else SongRow(item.row) { vm.playSong(item) }
                 }
-                list.items.isEmpty() -> NoMatchesNote { vm.filterSongs(query.cleared()) }
-                else -> {
-                    val pickable = remember(list.items) { list.items.map { Pickable(it.id, it) } }
-                    SelectableSongs(pickable) {
-                        SortedList(list, key = { it.id }) { track -> SongRow(track) { vm.playSong(track) } }
-                    }
-                }
+            }
+            if (rail && runs != null) {
+                val stops = remember(runs) { railStops(runs, headed = true) }
+                val current by remember(stops, state) { derivedStateOf { railLetterAt(stops, state.firstVisibleItemIndex) } }
+                LetterRail(stops, current, onJump = { state.requestScrollToItem(it) }, modifier = Modifier.fillMaxSize().padding(RailPadding))
             }
         }
     }
@@ -355,9 +406,12 @@ internal fun filteredCount(shown: Int, all: Int): String = "%,d of %,d %s".forma
 // Grids keep side margins; lists of rows run edge to edge. Both leave room
 // at the bottom for the floating bar, and at the end for the letter rail
 // while it shows: the grid its own margin past the rail, the rows the
-// rail's width.
-private fun listPadding(rail: Boolean) = PaddingValues(start = 20.dp, end = if (rail) LetterRailWidth + 8.dp else 20.dp, top = 4.dp, bottom = 140.dp)
-private fun rowsPadding(rail: Boolean) = PaddingValues(end = if (rail) LetterRailWidth else 0.dp, top = 4.dp, bottom = 140.dp)
+// rail's room (the rail and the back gesture's strip beyond it).
+@Composable
+private fun listPadding(rail: Boolean) = PaddingValues(start = 20.dp, end = if (rail) letterRailRoom() + 8.dp else 20.dp, top = 4.dp, bottom = 140.dp)
+
+@Composable
+private fun rowsPadding(rail: Boolean) = PaddingValues(end = if (rail) letterRailRoom() else 0.dp, top = 4.dp, bottom = 140.dp)
 
 // The letter rail runs beside the rows, clear of the floating bar.
 private val RailPadding = PaddingValues(top = 8.dp, bottom = 132.dp)
@@ -381,7 +435,8 @@ private fun <T> SortedList(sorted: Sorted<T>, key: (T) -> Any, row: @Composable 
         }
         if (rail && runs != null) {
             val stops = remember(runs) { railStops(runs, headed = true) }
-            LetterRail(stops, onJump = { state.requestScrollToItem(it) }, modifier = Modifier.fillMaxSize().padding(RailPadding))
+            val current by remember(stops, state) { derivedStateOf { railLetterAt(stops, state.firstVisibleItemIndex) } }
+            LetterRail(stops, current, onJump = { state.requestScrollToItem(it) }, modifier = Modifier.fillMaxSize().padding(RailPadding))
         }
     }
 }
@@ -481,9 +536,10 @@ private fun SearchPanel(open: Boolean, content: @Composable () -> Unit) {
     ) { content() }
 }
 
-// How many a list holds, for the title line: "2,835 songs".
+// How many a list holds, for the title line: "2,835 songs". An empty list
+// counts nothing; its note says why.
 internal fun listCount(list: Sorted<*>?, noun: String): String? {
-    val count = list?.items?.size ?: return null
+    val count = list?.items?.size?.takeIf { it > 0 } ?: return null
     return "%,d %s".format(count, if (count == 1) noun else "${noun}s")
 }
 
@@ -499,8 +555,9 @@ private fun <T> Loaded(sorted: Sorted<T>?, content: @Composable (Sorted<T>) -> U
         sorted == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(color = OctoColors.Accent, modifier = Modifier.size(28.dp))
         }
-        // Offers phone access or a server sign-in when either is missing.
-        sorted.items.isEmpty() -> EmptyLibraryNote()
+        // Offers phone access or a server sign-in when either is missing,
+        // and says the server's music is on its way while it is.
+        sorted.items.isEmpty() -> CopyNote { EmptyLibraryNote() }
         else -> content(sorted)
     }
 }

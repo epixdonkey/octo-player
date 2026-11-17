@@ -1,11 +1,22 @@
 package app.winters.octo.subsonic
 
+import app.winters.octo.subsonic.gateway.checkStreamed
+import app.winters.octo.subsonic.gateway.jsonBody
+import com.squareup.moshi.JsonDataException
+import com.squareup.moshi.JsonEncodingException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -21,22 +32,37 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okio.Buffer
+import okio.BufferedSource
+import okio.buffer
+import okio.sink
+import okio.source
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
 
 const val API_VERSION = "1.16.1"
 
+// How many bytes a drain reads at a time, checking for a cancel between.
+const val DRAIN_BUFFER = 64L * 1024
+
+// How many bytes a drain writes between asks of whether there is room.
+const val DRAIN_ROOM_EVERY = 4L * 1024 * 1024
+
+// No values, for a paged call that sends none of a list.
+val NO_VALUES: PagedValues = PagedValues.of(emptyList())
+
 class SubsonicClient(
     // The address the server is known by. Its library is kept under this
     // address whichever one the calls go to.
     val primaryUrl: HttpUrl,
     credentials: Credentials,
-    http: OkHttpClient,
+    // The server's headers, certificates and sign-in page cookies come with
+    // the client, from the security installed on it, so every route keeps
+    // to the same rules.
+    private val http: OkHttpClient,
     private val clientName: String = "Octo",
-    // Headers every request to the server carries, such as a proxy's
-    // access token. They go only to the server's own addresses.
-    private val headers: Map<String, String> = emptyMap(),
     // The library folder calls are limited to, or null for all of them.
     val musicFolderId: String? = null,
     // Where calls go right now, when the server has more than one address.
@@ -53,15 +79,6 @@ class SubsonicClient(
     val username: String get() = credentials.username
 
     val authMode: AuthMode get() = credentials.mode
-
-    // The client as it was given, before this server's headers were added.
-    private val plainHttp: OkHttpClient = http
-
-    private val http: OkHttpClient =
-        if (headers.isEmpty()) http
-        else http.newBuilder()
-            .addNetworkInterceptor(ServerHeaders { HeaderScope(setOf(origin(primaryUrl), origin(baseUrl)), headers) })
-            .build()
 
     // For the one call that can take minutes: Octo builds the stations the
     // first time they are asked for after it starts.
@@ -109,17 +126,18 @@ class SubsonicClient(
 
     // Whether the server lists an extension at this version, or null when it
     // could not be asked: out of reach, a proxy answering while it restarts,
-    // a page that is not the server's, or the sign-in refused. Only a yes or
-    // no is the server's own answer, worth keeping; a null is worth asking
-    // again. A server that answers the call with an error, or has no such
-    // address (a 404), has no extensions to list, which is a no.
+    // a sign-in page in front of the server, a page that is not the
+    // server's, or the sign-in refused. Only a yes or no is the server's own
+    // answer, worth keeping; a null is worth asking again. A server that
+    // answers the call with an error, or has no such address (a 404), has no
+    // extensions to list, which is a no.
     suspend fun supportsIfKnown(name: String, version: Int = 1): Boolean? =
         try {
             extensions().lists(name, version)
         } catch (e: SubsonicException.Unreachable) {
             null
         } catch (e: SubsonicException.NotSubsonic) {
-            if (e.status != null && !e.serverBusy) false else null
+            if (e.gateway == null && e.status != null && !e.serverBusy) false else null
         } catch (e: SubsonicException.WrongCredentials) {
             null
         } catch (e: SubsonicException) {
@@ -128,14 +146,25 @@ class SubsonicClient(
 
     // The downloads Octo is doing for the signed-in user, and the ones it
     // finished lately. Only for servers that list the octoAcquisitions
-    // extension; others answer with an error.
-    suspend fun acquisitions(): List<Acquisition> =
-        get("getAcquisitions", key = "acquisitions", serializer = Acquisitions.serializer(), default = Acquisitions()).acquisition
+    // extension; others answer with an error. `keepsAnyway` is whether the
+    // server lists OCTO_KEEP_ANYWAY_VERSION; only then are a row's
+    // `keepAnyway` and `heldTracks` read.
+    suspend fun acquisitions(keepsAnyway: Boolean = false): List<Acquisition> =
+        get("getAcquisitions", key = "acquisitions", serializer = Acquisitions.serializer(), default = Acquisitions())
+            .acquisition.map { it.listedBy(keepsAnyway) }
 
     // One download with its whole log, by the key the list gives it. Only
-    // for servers that list octoAcquisitions at version 2.
-    suspend fun acquisition(key: String): Acquisition =
-        get("getAcquisition", mapOf("key" to key), "acquisition", Acquisition.serializer())
+    // for servers that list octoAcquisitions at version 2. `keepsAnyway` as
+    // for acquisitions.
+    suspend fun acquisition(key: String, keepsAnyway: Boolean = false): Acquisition =
+        get("getAcquisition", mapOf("key" to key), "acquisition", Acquisition.serializer()).listedBy(keepsAnyway)
+
+    // Keeps a held download anyway, by the key the list gives it: the
+    // version the signed-in user heard, or an album's held tracks, though
+    // Octo could not prove them. Answers ok, or an error in the server's
+    // words. Only for servers that list octoAcquisitions at
+    // OCTO_KEEP_ANYWAY_VERSION.
+    suspend fun keepAcquisitionAnyway(key: String) = send("keepAcquisitionAnyway", listOf("key" to key))
 
     // Takes the finished downloads off the signed-in user's list, or only
     // the one with this key, and answers how many left it.
@@ -448,6 +477,160 @@ class SubsonicClient(
     suspend fun playlist(id: String): PlaylistWithSongs =
         get("getPlaylist", mapOf("id" to id), "playlist", PlaylistWithSongs.serializer())
 
+    // The same playlist read through `file`, for one too long to hold: the
+    // whole answer is first written to the file at network speed (see
+    // drain), then its songs are handed to `page` a page at a time from the
+    // file, each decoded as `playlist` decodes it. Answers the playlist
+    // without its songs, only once the whole answer was read and the server
+    // said it went well. `room` hears how many bytes are in the file every
+    // DRAIN_ROOM_EVERY and may throw to stop. The caller owns the file and
+    // deletes it.
+    suspend fun playlistInto(
+        id: String,
+        file: File,
+        room: (Long) -> Unit = {},
+        pageSize: Int = LISTED_PAGE,
+        page: suspend (List<Song>) -> Unit,
+    ): PlaylistWithSongs {
+        drain(url("getPlaylist", mapOf("id" to id)), "getPlaylist", file, room)
+        return readDrained(file) { readListed(it, json, "playlist", "entry", PlaylistWithSongs.serializer(), pageSize, page = page) }
+    }
+
+    // An album read the same way, its songs a page at a time; its animated
+    // art as `album` gives it.
+    suspend fun albumInto(
+        id: String,
+        file: File,
+        room: (Long) -> Unit = {},
+        pageSize: Int = LISTED_PAGE,
+        page: suspend (List<Song>) -> Unit,
+    ): AlbumWithSongs {
+        drainAlbum(id, file, room)
+        return readAlbum(file, pageSize, page)
+    }
+
+    // An album's whole answer written into `file` before anything reads it
+    // (see drain); read it with readAlbum, as often as needed, with no
+    // second request.
+    suspend fun drainAlbum(id: String, file: File, room: (Long) -> Unit = {}) {
+        drain(url("getAlbum", mapOf("id" to id)), "getAlbum", file, room)
+    }
+
+    // A drained album: its songs handed to `page` a page at a time, each
+    // decoded as `album` decodes it, and the album without them.
+    suspend fun readAlbum(file: File, pageSize: Int = LISTED_PAGE, page: suspend (List<Song>) -> Unit): AlbumWithSongs {
+        val album = readDrained(file) { readListed(it, json, "album", "song", AlbumWithSongs.serializer(), pageSize, page = page) }
+        return album.animatedArt?.let { album.copy(animatedArt = it.resolvedOn(baseUrl).takeUnless(AnimatedArt::isEmpty)) } ?: album
+    }
+
+    // The play queue saved on the server, written whole into `file` before
+    // anything reads it (see drain); read it with readPlayQueue, as often as
+    // needed, with no second request.
+    suspend fun drainPlayQueue(byIndex: Boolean, file: File, room: (Long) -> Unit = {}) {
+        val endpoint = if (byIndex) "getPlayQueueByIndex" else "getPlayQueue"
+        drain(url(endpoint), endpoint, file, room)
+    }
+
+    // A drained play queue: its songs handed to `page` a page at a time, each
+    // decoded as playQueue decodes it, and its head without them. An answer
+    // with no queue is an empty one, as playQueue has it.
+    suspend fun readPlayQueue(file: File, byIndex: Boolean, pageSize: Int = LISTED_PAGE, page: suspend (List<Song>) -> Unit): QueueHead =
+        readDrained(file) { source ->
+            if (byIndex) {
+                readListed(source, json, "playQueueByIndex", "entry", PlayQueueByIndex.serializer(), pageSize, PlayQueueByIndex(), page)
+                    .let { QueueHead(null, it.currentIndex, it.position, it.changed, it.changedBy) }
+            } else {
+                readListed(source, json, "playQueue", "entry", PlayQueue.serializer(), pageSize, PlayQueue(), page)
+                    .let { QueueHead(it.current, null, it.position, it.changed, it.changedBy) }
+            }
+        }
+
+    // A folder's answer written whole into `file` (see drain): the top's
+    // (getIndexes) when `id` is null, otherwise that folder's.
+    suspend fun drainFolder(id: String?, file: File, room: (Long) -> Unit = {}) {
+        if (id == null) drain(url("getIndexes", emptyMap<String, String>().inFolder(musicFolderId)), "getIndexes", file, room)
+        else drain(url("getMusicDirectory", mapOf("id" to id)), "getMusicDirectory", file, room)
+    }
+
+    // A drained folder answer: its songs handed to `song` one at a time, in
+    // the order sent, each decoded as musicDirectory decodes it, and its
+    // folders answered in the order indexes or musicDirectory lists them.
+    suspend fun readFolder(file: File, top: Boolean, song: suspend (Song) -> Unit): List<DirectoryRef> =
+        readDrained(file) { readFolderAnswer(it, json, top, song) }
+
+    // Writes a call's whole answer into `file` before anything reads it, so
+    // the server is never left waiting on a reader that writes as it goes.
+    // A cancel of the caller stops the call at once, even in the middle of
+    // a read, and the copy checks for one after every DRAIN_BUFFER bytes.
+    // Every DRAIN_ROOM_EVERY bytes `room` hears how many are written, and
+    // may throw to stop. An answer that is not a success is NotSubsonic, a
+    // connection that fails Unreachable, as `fetch` has them.
+    private suspend fun drain(url: HttpUrl, endpoint: String, file: File, room: (Long) -> Unit) = coroutineScope {
+        val call = http.newCall(Request.Builder().url(url).build())
+        val stop = launch {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
+        try {
+            val response = try {
+                call.await()
+            } catch (e: IOException) {
+                throw SubsonicException.Unreachable(e)
+            }
+            withContext(Dispatchers.IO) {
+                response.use {
+                    it.checkStreamed(endpoint)
+                    try {
+                        copyInto(it.body.source(), file, room)
+                    } catch (e: IOException) {
+                        ensureActive()
+                        throw SubsonicException.Unreachable(e)
+                    }
+                }
+            }
+        } finally {
+            stop.cancel()
+        }
+    }
+
+    private suspend fun copyInto(source: BufferedSource, file: File, room: (Long) -> Unit) {
+        file.parentFile?.mkdirs()
+        file.sink().buffer().use { out ->
+            val buffer = Buffer()
+            var written = 0L
+            var next = DRAIN_ROOM_EVERY
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val read = source.read(buffer, DRAIN_BUFFER)
+                if (read == -1L) break
+                out.write(buffer, read)
+                written += read
+                if (written >= next) {
+                    room(written)
+                    next += DRAIN_ROOM_EVERY
+                }
+            }
+        }
+    }
+
+    // Reads a drained answer back from its file: an answer that is not
+    // JSON is NotSubsonic, as `decode` has it, and a file cut short
+    // Unreachable, as a cut connection is.
+    private suspend fun <T> readDrained(file: File, read: suspend (BufferedSource) -> T): T = withContext(Dispatchers.IO) {
+        try {
+            file.source().buffer().use { read(it) }
+        } catch (e: JsonDataException) {
+            throw SubsonicException.NotSubsonic("The server did not answer like a Subsonic server")
+        } catch (e: JsonEncodingException) {
+            throw SubsonicException.NotSubsonic("The server did not answer like a Subsonic server")
+        } catch (e: IOException) {
+            throw SubsonicException.Unreachable(e)
+        }
+    }
+
     // Where a playlist's songs sit on the server, in its order, for a
     // playlist file. A server that keeps its paths to itself sends none.
     suspend fun playlistPaths(id: String): List<SongPath> =
@@ -529,6 +712,31 @@ class SubsonicClient(
     suspend fun starred(): Starred =
         get("getStarred2", key = "starred2", serializer = Starred.serializer(), default = Starred())
 
+    // The same stars, handed to `page` a page at a time as the answer
+    // arrives (see readStarred), so a big library's are never held whole.
+    // Returns only once the answer was read to its end and the server said
+    // it went well; a cut-off answer throws Unreachable.
+    suspend fun starredInto(page: suspend (List<StarredItem>) -> Unit) {
+        val request = Request.Builder().url(url("getStarred2")).build()
+        val response = try {
+            http.newCall(request).await()
+        } catch (e: IOException) {
+            throw SubsonicException.Unreachable(e)
+        }
+        response.use {
+            withContext(Dispatchers.IO) { it.checkStreamed("getStarred2") }
+            try {
+                withContext(Dispatchers.IO) { readStarred(it.body.source(), page) }
+            } catch (e: JsonDataException) {
+                throw SubsonicException.NotSubsonic("The server did not answer like a Subsonic server")
+            } catch (e: JsonEncodingException) {
+                throw SubsonicException.NotSubsonic("The server did not answer like a Subsonic server")
+            } catch (e: IOException) {
+                throw SubsonicException.Unreachable(e)
+            }
+        }
+    }
+
     // Marks songs as starred for the signed-in user. Several go in one call.
     suspend fun star(ids: List<String>) = send("star", ids.map { "id" to it })
 
@@ -584,6 +792,36 @@ class SubsonicClient(
             LyricsChoiceAnswer(id, candidate),
         ).choice
 
+    // An outside song's versions: the video it streams from and the other
+    // videos it can, which the server lists from YouTube (up to ten
+    // seconds). `id` is the song's id as it streams. Only for servers that
+    // list STREAM_VERSIONS_EXTENSION.
+    suspend fun streamVersions(id: String): StreamVersions =
+        get("getStreamVersions", mapOf("id" to id), "streamVersions", StreamVersions.serializer())
+
+    // Makes `video` (one of streamVersions' rows) the one the outside song
+    // streams from for everyone on the server, from each play's next start,
+    // or with STREAM_VERSION_AUTO goes back to Octo's own pick. Answers the
+    // song's versions as they are now, `ids` every id the song has. A
+    // refusal is the server's error in its own words (SubsonicException).
+    suspend fun setStreamVersion(id: String, video: String): StreamVersions =
+        get("setStreamVersion", mapOf("id" to id, "video" to video), "streamVersions", StreamVersions.serializer())
+
+    // The outside songs whose chosen version changed after a cursor, as the
+    // last answer gave it (`epoch`, `since`); both null asks for every
+    // change the server keeps. Only for servers that list
+    // STREAM_VERSION_CHANGES_EXTENSION.
+    suspend fun streamVersionChanges(epoch: String?, since: Long?): StreamVersionChanges =
+        get(
+            "getStreamVersionChanges",
+            buildMap {
+                epoch?.let { put("epoch", it) }
+                since?.let { put("since", "$it") }
+            },
+            "streamVersionChanges",
+            StreamVersionChanges.serializer(),
+        )
+
     // The older lyrics call, found by artist and title: plain text, or null
     // when the server has none.
     suspend fun lyrics(artist: String, title: String): String? =
@@ -601,19 +839,63 @@ class SubsonicClient(
     // sends the params in a form body, for a server that lists that
     // extension; otherwise a long list goes in batches.
     suspend fun createPlaylist(name: String, songIds: List<String>, formPost: Boolean = false): PlaylistWithSongs? {
-        val (first, rest) = createCalls(name, songIds, formPost)
+        val (first, rest) = createPaged(name, PagedValues.of(songIds), formPost)
         val created = decode(sendCall(first, formPost), null, CreatedPlaylist.serializer(), null).playlist
-        if (rest.isNotEmpty()) {
+        if (rest.any()) {
             val id = created?.id ?: throw SubsonicException.Server(0, "The server did not say the new playlist's id")
-            addSongsCalls(id, rest).forEach { sendCall(it, formPost) }
+            addSongsPaged(id, rest).forEach { sendCall(it, formPost) }
+        }
+        return created
+    }
+
+    // The same for songs too many to hold, sent from `songs` a page at a
+    // time. The answer is read for whether it went well and for the new
+    // playlist without its songs, which are skipped as they arrive.
+    // `skipped` hears the ids a server listing octoPlaylistSongs says it
+    // left out (octoSkipped), once per call that skipped any.
+    suspend fun createPlaylist(
+        name: String,
+        songs: PagedValues,
+        formPost: Boolean = false,
+        skipped: (List<String>) -> Unit = {},
+    ): PlaylistWithSongs? {
+        val (first, rest) = createPaged(name, songs, formPost)
+        val created = sendForHead(first, formPost, head = true, skipped = skipped)
+        if (rest.any()) {
+            val id = created?.id ?: throw SubsonicException.Server(0, "The server did not say the new playlist's id")
+            addSongsPaged(id, rest).forEach { sendForHead(it, formPost, skipped = skipped) }
         }
         return created
     }
 
     // Makes a playlist's songs exactly these, in this order: createPlaylist
-    // with the playlist's id replaces its whole list.
-    suspend fun replacePlaylistSongs(id: String, songIds: List<String>, formPost: Boolean = false) {
-        replaceSongsCalls(id, songIds, formPost).forEach { sendCall(it, formPost) }
+    // with the playlist's id replaces its whole list. `ifStamp` (the changed
+    // time the server sent for it) makes Octo refuse it when the playlist
+    // changed since (SubsonicException.Server with `conflict`); `ownIds`
+    // says the ids are the server's own; `skipped` hears the ids it left out.
+    suspend fun replacePlaylistSongs(
+        id: String,
+        songIds: List<String>,
+        formPost: Boolean = false,
+        ifStamp: String? = null,
+        ownIds: Boolean = false,
+        skipped: (List<String>) -> Unit = {},
+    ) {
+        replaceSongsPaged(id, PagedValues.of(songIds), formPost, ifStamp = ifStamp, ownIds = ownIds).forEach { call ->
+            skippedInBody(sendCall(call, formPost)).takeIf { it.isNotEmpty() }?.let(skipped)
+        }
+    }
+
+    // The same for songs too many to hold, sent from `songs` a page at a time.
+    suspend fun replacePlaylistSongs(
+        id: String,
+        songs: PagedValues,
+        formPost: Boolean = false,
+        ifStamp: String? = null,
+        ownIds: Boolean = false,
+        skipped: (List<String>) -> Unit = {},
+    ) {
+        replaceSongsPaged(id, songs, formPost, ifStamp = ifStamp, ownIds = ownIds).forEach { sendForHead(it, formPost, skipped = skipped) }
     }
 
     // Changes a playlist's details, takes songs out by their place in the
@@ -628,18 +910,82 @@ class SubsonicClient(
         songIndexesToRemove: List<Int> = emptyList(),
         songsToRemove: List<Pair<String, Int>> = emptyList(),
         formPost: Boolean = false,
+        skipped: (List<String>) -> Unit = {},
     ) {
-        updateCalls(id, name, comment, public, songIdsToAdd, songIndexesToRemove, songsToRemove, formPost).forEach { sendCall(it, formPost) }
+        updatePaged(
+            id, name, comment, public,
+            PagedValues.of(songIdsToAdd),
+            PagedValues.of(songIndexesToRemove.map { "$it" }),
+            PagedValues.of(songsToRemove.map { (song, copy) -> "$song@$copy" }),
+            formPost,
+        ).forEach { call -> skippedInBody(sendCall(call, formPost)).takeIf { it.isNotEmpty() }?.let(skipped) }
+    }
+
+    // The same for songs too many to hold: songs to add, places to take out
+    // and songs to take out by song ("id@copy"), each sent from its values a
+    // page at a time.
+    suspend fun updatePlaylist(
+        id: String,
+        name: String? = null,
+        comment: String? = null,
+        public: Boolean? = null,
+        songIdsToAdd: PagedValues,
+        songIndexesToRemove: PagedValues = NO_VALUES,
+        songsToRemove: PagedValues = NO_VALUES,
+        formPost: Boolean = false,
+        skipped: (List<String>) -> Unit = {},
+    ) {
+        updatePaged(id, name, comment, public, songIdsToAdd, songIndexesToRemove, songsToRemove, formPost).forEach {
+            sendForHead(it, formPost, skipped = skipped)
+        }
     }
 
     suspend fun deletePlaylist(id: String) = send("deletePlaylist", listOf("id" to id))
 
     // Runs one playlist call, with its params in the address or in a form
     // body, and hands back the answer once it is known to be ok.
-    private suspend fun sendCall(call: PlaylistCall, formPost: Boolean): String {
-        if (formPost) return postForm(call.endpoint, call.params)
-        val address = url(call.endpoint).newBuilder().apply { call.params.forEach { (key, value) -> addQueryParameter(key, value) } }.build()
-        return exchange(Request.Builder().url(address).build(), call.endpoint)
+    private suspend fun sendCall(call: PagedCall, formPost: Boolean): String = exchange(requestOf(call, formPost), call.endpoint)
+
+    // Runs one playlist call and reads its answer as it arrives: whether it
+    // went well, as `exchange` checks it, and with `head` the playlist it
+    // names without its songs (null when it names none), as createPlaylist
+    // reads it.
+    private suspend fun sendForHead(
+        call: PagedCall,
+        formPost: Boolean,
+        head: Boolean = false,
+        skipped: (List<String>) -> Unit = {},
+    ): PlaylistWithSongs? {
+        val root = try {
+            val response = http.newCall(requestOf(call, formPost)).await()
+            withContext(Dispatchers.IO) {
+                response.use {
+                    it.checkStreamed(call.endpoint)
+                    try {
+                        readAnswerHead(it.body.source(), json)
+                    } catch (e: JsonDataException) {
+                        null
+                    } catch (e: JsonEncodingException) {
+                        null
+                    }
+                }
+            }
+        } catch (e: IOException) {
+            throw SubsonicException.Unreachable(e)
+        }
+        return withContext(Dispatchers.Default) {
+            decodeRoot(root, null, ServerInfo.serializer(), null)
+            skippedIn(root).takeIf { it.isNotEmpty() }?.let(skipped)
+            if (head) decodeRoot(root, null, CreatedPlaylist.serializer(), null).playlist else null
+        }
+    }
+
+    // A playlist call's request: its params in the address, or in a form
+    // body streamed from its values, with only the sign-in in the address.
+    private fun requestOf(call: PagedCall, formPost: Boolean): Request {
+        if (formPost) return Request.Builder().url(url(call.endpoint)).post(StreamedForm(call)).build()
+        val address = url(call.endpoint).newBuilder().apply { call.pairs().forEach { (key, value) -> addQueryParameter(key, value) } }.build()
+        return Request.Builder().url(address).build()
     }
 
     // Sends the params in a form body rather than the address, and hands
@@ -653,12 +999,7 @@ class SubsonicClient(
     private suspend fun exchange(request: Request, endpoint: String, http: OkHttpClient = this.http): String {
         val body = try {
             val response = http.newCall(request).await()
-            withContext(Dispatchers.IO) {
-                response.use {
-                    if (!it.isSuccessful) throw SubsonicException.NotSubsonic("HTTP ${it.code} from $endpoint", it.code)
-                    it.body.string()
-                }
-            }
+            withContext(Dispatchers.IO) { response.use { it.jsonBody(endpoint) } }
         } catch (e: IOException) {
             throw SubsonicException.Unreachable(e)
         }
@@ -696,7 +1037,7 @@ class SubsonicClient(
     // The same server, headers and route signed in with another secret, for
     // checking a password without touching this client.
     fun withSecret(secret: String): SubsonicClient =
-        SubsonicClient(primaryUrl, Credentials(username, secret, authMode), plainHttp, clientName, headers, musicFolderId, route)
+        SubsonicClient(primaryUrl, Credentials(username, secret, authMode), http, clientName, musicFolderId, route)
 
     // A call that only answers ok or an error. The params may repeat a name.
     internal suspend fun send(endpoint: String, params: List<Pair<String, String>>) {
@@ -739,41 +1080,46 @@ class SubsonicClient(
         return withContext(Dispatchers.Default) { decode(body, key, serializer, default) }
     }
 
+    // The answer's body once it is known to be JSON or empty. Anything else
+    // (an error status, a sign-in page, a page that is not the server's) is
+    // NotSubsonic, naming the gateway in front of the server when one
+    // answered.
     private suspend fun fetch(url: HttpUrl, endpoint: String, http: OkHttpClient = this.http): String {
         val request = Request.Builder().url(url).build()
         return try {
             val response = http.newCall(request).await()
-            withContext(Dispatchers.IO) {
-                response.use {
-                    if (!it.isSuccessful) {
-                        throw SubsonicException.NotSubsonic("HTTP ${it.code} from $endpoint", it.code)
-                    }
-                    it.body.string()
-                }
-            }
+            withContext(Dispatchers.IO) { response.use { it.jsonBody(endpoint) } }
         } catch (e: IOException) {
             throw SubsonicException.Unreachable(e)
         }
     }
 
-    internal fun <T> decode(body: String, key: String?, serializer: KSerializer<T>, default: T?): T {
-        val root = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
-            ?.get("subsonic-response")?.jsonObject
-            ?: throw SubsonicException.NotSubsonic("The server did not answer like a Subsonic server")
-        if (root["status"]?.jsonPrimitive?.contentOrNull != "ok") {
-            val error = root["error"]?.jsonObject
-            val code = error?.get("code")?.jsonPrimitive?.intOrNull ?: 0
-            val message = error?.get("message")?.jsonPrimitive?.contentOrNull ?: "Request failed"
-            throw when (code) {
-                40, 44 -> SubsonicException.WrongCredentials(message)
-                41, 42 -> SubsonicException.AuthNotSupported(code, message)
-                70 -> SubsonicException.NotFound(message)
-                else -> SubsonicException.Server(code, message)
-            }
+    // An answer of any other shape throws only SubsonicException: no
+    // "subsonic-response" object is NotSubsonic, and a payload that does not
+    // read as asked is Server, so callers that catch SubsonicException see
+    // every way an answer can be wrong.
+    internal fun <T> decode(body: String, key: String?, serializer: KSerializer<T>, default: T?): T =
+        decodeRoot(runCatching { json.parseToJsonElement(body) as? JsonObject }.getOrNull()?.get("subsonic-response") as? JsonObject, key, serializer, default)
+
+    // The same, for an answer's own object already read (null when the body
+    // held none).
+    internal fun <T> decodeRoot(answer: JsonObject?, key: String?, serializer: KSerializer<T>, default: T?): T {
+        val root = answer ?: throw SubsonicException.NotSubsonic(NOT_LIKE_SUBSONIC)
+        if ((root["status"] as? JsonPrimitive)?.contentOrNull != "ok") {
+            val error = root["error"] as? JsonObject
+            val code = (error?.get("code") as? JsonPrimitive)?.intOrNull ?: 0
+            val message = (error?.get("message") as? JsonPrimitive)?.contentOrNull ?: "Request failed"
+            val conflict = (error?.get("octoConflict") as? JsonPrimitive)?.booleanOrNull == true
+            throw subsonicError(code, message, conflict)
         }
         val payload = if (key == null) root else root[key]
         return when {
-            payload != null -> json.decodeFromJsonElement(serializer, payload)
+            payload != null -> try {
+                json.decodeFromJsonElement(serializer, payload)
+            } catch (e: IllegalArgumentException) {
+                // SerializationException is one too.
+                throw SubsonicException.Server(0, if (key == null) "The answer could not be read" else "The answer's \"$key\" could not be read")
+            }
             default != null -> default
             else -> throw SubsonicException.Server(0, "Missing \"$key\" in the answer")
         }
@@ -862,12 +1208,13 @@ class SubsonicClient(
         }
 
     // Like get, for params that may repeat a name.
+    // With no `default`, an answer missing `key` is an error.
     internal suspend fun <T> getWith(
         endpoint: String,
         params: List<Pair<String, String>>,
         key: String,
         serializer: KSerializer<T>,
-        default: T,
+        default: T? = null,
     ): T {
         val url = url(endpoint).newBuilder().apply { params.forEach { (name, value) -> addQueryParameter(name, value) } }.build()
         val body = fetch(url, endpoint)

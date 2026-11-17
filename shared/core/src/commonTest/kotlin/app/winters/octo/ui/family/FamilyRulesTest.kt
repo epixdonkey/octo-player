@@ -1,5 +1,7 @@
 package app.winters.octo.ui.family
 
+import app.winters.octo.connection.DISTRUSTED_MESSAGE
+import app.winters.octo.connection.DistrustedCertificateException
 import app.winters.octo.subsonic.DeviceQualityMode
 import app.winters.octo.subsonic.StreamQuality
 import app.winters.octo.subsonic.FamilyQuality
@@ -23,6 +25,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import javax.net.ssl.SSLHandshakeException
 
 // Outside song actions, offline copies, the request sheet, notices, the
 // abilities in plain words and joining with a code.
@@ -110,6 +113,38 @@ class FamilyRulesTest {
         val open = requestSheet(member(limit = 0, storageLimit = 0, storageUsed = 99_000_000_000))
         assertNull(open.quotaLine)
         assertNull(open.storageLine)
+    }
+
+    // Music goes to the shared library: no "Your library, x of N GB", no
+    // meter and no full warning, even with a limit kept for later; the
+    // plan and a manager's list say where the songs go. Own (or an older
+    // server that never says) keeps the library row.
+    @Test
+    fun musicThatGoesToTheSharedLibraryShowsNoStorage() {
+        val shared = member(add = AddToLibrary.Direct, storageUsed = 60_000_000_000, storageLimit = 50).let {
+            it.copy(abilities = it.abilities.copy(musicGoesToName = "Shared"))
+        }
+        assertEquals(LibraryRow("Your songs go to the shared library", null, null), libraryRow(shared))
+        assertNull(requestSheet(shared).storageLine)
+        val lines = abilityLines(shared.abilities).map { it.text }
+        assertEquals("Songs you add go straight into the shared library", lines[0])
+        assertTrue(lines.none { "your library" in it })
+        val own = member(storageUsed = 5_400_000_000, storageLimit = 10)
+        assertEquals(LibraryRow("Your library", "5.4 of 10 GB used", 0.54f), libraryRow(own))
+        val listed = app.winters.octo.subsonic.FamilyMember(username = "ria", storageUsedBytes = 5_400_000_000, storageLimitGb = 10)
+        assertEquals("5.4 of 10 GB used", memberStorageLine(listed))
+        assertEquals("Adds to the shared library", memberStorageLine(listed.copy(musicGoesToName = "Shared")))
+    }
+
+    // Older servers send no musicGoesTo, and a name this app doesn't know
+    // reads as the member's own library.
+    @Test
+    fun musicGoesToReadsLeniently() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        assertFalse(json.decodeFromString(FamilyAbilities.serializer(), "{}").musicGoesToShared)
+        assertTrue(json.decodeFromString(FamilyAbilities.serializer(), """{"musicGoesTo":"Shared"}""").musicGoesToShared)
+        assertFalse(json.decodeFromString(FamilyAbilities.serializer(), """{"musicGoesTo":"Elsewhere"}""").musicGoesToShared)
+        assertTrue(json.decodeFromString(app.winters.octo.subsonic.FamilyMember.serializer(), """{"username":"ria","musicGoesTo":"Shared"}""").musicGoesToShared)
     }
 
     @Test
@@ -252,6 +287,15 @@ class FamilyRulesTest {
             val refused = joinWithInvite(server.url, "tok_1", "Alex", "long enough", OkHttpClient())
             assertTrue(refused is JoinOutcome.Failed)
         }
+    }
+
+    @Test
+    fun aDistrustedAuthoritySaysSoInsteadOfAskingAboutTheCertificate() = runBlocking {
+        val refusing = OkHttpClient.Builder().addInterceptor {
+            throw SSLHandshakeException("handshake failed").apply { initCause(DistrustedCertificateException()) }
+        }.build()
+        val refused = joinWithInvite("https://music.test/".toHttpUrl(), "tok_1", "Alex", "long enough", refusing)
+        assertEquals(DISTRUSTED_MESSAGE, (refused as JoinOutcome.Failed).message)
     }
 
     @Test

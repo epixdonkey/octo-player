@@ -4,7 +4,9 @@ import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.DataSpec
+import app.winters.octo.subsonic.VIDEO_HEADER
 import java.io.IOException
 import java.util.Locale
 
@@ -12,11 +14,15 @@ import java.util.Locale
 // file's length, each when it said. A server can send a song as another
 // file than it listed (a whole FLAC for a listed preview), so what is held
 // or saved of one file is never continued with another's bytes.
-data class StreamShape(val type: String?, val total: Long?) {
+// `video` is the YouTube video an Octo server made an outside song's answer
+// from (X-Octo-Video), when it says.
+data class StreamShape(val type: String?, val total: Long?, val video: String? = null) {
     // Whether two answers are of different files: both name a type and the
-    // types differ, or both give a whole length and the lengths differ.
-    // What one leaves out is no difference.
+    // types differ, both give a whole length and the lengths differ, or both
+    // name a video and the videos differ. What one leaves out is no
+    // difference.
     fun differsFrom(other: StreamShape): Boolean {
+        if (video != null && other.video != null && video != other.video) return true
         val a = plainType(type)
         val b = plainType(other.type)
         if (a != null && b != null && a != b) return true
@@ -41,7 +47,11 @@ fun streamShapeOf(headers: Map<String, List<String>>): StreamShape {
     } else {
         header("Content-Length")?.trim()?.toLongOrNull()
     }
-    return StreamShape(plainType(header("Content-Type")), total?.takeIf { it > 0 })
+    return StreamShape(
+        plainType(header("Content-Type")),
+        total?.takeIf { it > 0 },
+        header(VIDEO_HEADER)?.trim()?.takeIf(String::isNotEmpty),
+    )
 }
 
 // What the saved copies know of the file each was saved from.
@@ -60,7 +70,10 @@ class StreamChanged : IOException("the server sent another file for this song")
 // Checks every answer for a server song against the first one this reader
 // had and the one its saved copy was made from. Another file lets the saved
 // copy go and fails the load at once, so the song is opened again from its
-// start instead of carrying on with the other file's bytes.
+// start instead of carrying on with the other file's bytes. A later part
+// refused with 503 is the same: the server let go of the file the song was
+// read from (Octo does, when a kept copy is gone), and from the first byte
+// it sends the file it has now.
 @OptIn(UnstableApi::class)
 class ShapeGuardDataSource(
     private val upstream: DataSource,
@@ -70,7 +83,14 @@ class ShapeGuardDataSource(
     private var seen: StreamShape? = null
 
     override fun open(dataSpec: DataSpec): Long {
-        val length = upstream.open(dataSpec)
+        val length = try {
+            upstream.open(dataSpec)
+        } catch (e: HttpDataSource.InvalidResponseCodeException) {
+            if (e.responseCode != 503 || dataSpec.position <= 0 || !isStream(dataSpec.uri)) throw e
+            seen = null
+            dataSpec.key?.let { shapes?.drop(it) }
+            throw StreamChanged()
+        }
         if (!isStream(dataSpec.uri)) return length
         val now = streamShapeOf(upstream.responseHeaders)
         val key = dataSpec.key
@@ -81,7 +101,7 @@ class ShapeGuardDataSource(
             key?.let { shapes?.drop(it) }
             throw StreamChanged()
         }
-        seen = StreamShape(before?.type ?: now.type, before?.total ?: now.total)
+        seen = StreamShape(before?.type ?: now.type, before?.total ?: now.total, before?.video ?: now.video)
         if (key != null) shapes?.note(key, now)
         return length
     }

@@ -55,6 +55,8 @@ import kotlin.random.Random
 //                    (0, never)
 //   queue=<file>     the songs picked, written by the first run and read by
 //                    the next ones, so every run plays the same songs
+//   calibrate=true   pauses and checks the memory log's parts instead of
+//                    playing on (see calibrate)
 // What it plays is written to <plan>.events, a line each.
 const val SOAK_RUN = "octo.soak"
 
@@ -92,6 +94,7 @@ suspend fun soakRun(app: AppState, plan: File) {
         app.play(songs, 0, source = "Soak")
     }
     app.player.setRepeat(RepeatMode.All)
+    if (wants.getProperty("calibrate", "false") == "true") return calibrate(app, ::note)
     // Every `purgeEvery` seconds, each window's graphics card cache is emptied
     // (its limit set to nothing, then back), so the spares it holds go and
     // the blocks they sat in can be let go. Each renderer is reached the way
@@ -177,6 +180,53 @@ suspend fun soakRun(app: AppState, plan: File) {
             if (!app.player.state.value.playing) app.player.togglePlay()
         }
     }
+}
+
+// Checks that the memory log's parts move as they should, with the song
+// paused: memory the app takes outside every named part shows in `other`
+// alone, and the graphics memory of the full player does not. Writes a
+// "calib" line with the memory fields once each step has settled (or
+// settled=no after 5 minutes), then "calib done".
+private suspend fun calibrate(app: AppState, note: (String) -> Unit) {
+    fun art(choice: String) = app.settings.update { it.copy(appearance = it.appearance.copy(animatedArt = choice)) }
+    app.player.pause()
+    art("off")
+    app.fullPlayer = false
+    // Read until two readings 30 s apart have `watched` within 8 MB, at most 5 minutes.
+    suspend fun settled(step: String, watched: (MemoryReading) -> Long? = { it.privateMb }) {
+        var last = withContext(Dispatchers.IO) { readMemory { null } }
+        var steady = false
+        for (attempt in 1..10) {
+            delay(30_000)
+            val now = withContext(Dispatchers.IO) { readMemory { null } }
+            val before = watched(last)
+            val after = watched(now)
+            last = now
+            if (before != null && after != null && kotlin.math.abs(after - before) <= 8) {
+                steady = true
+                break
+            }
+        }
+        val fields = memoryLine("", 0, last, "", false, 0, null).substringAfter("private=").substringBefore(" window=")
+        note("calib $step settled=${if (steady) "yes" else "no"} private=$fields")
+    }
+    settled("start")
+    val block = com.sun.jna.Memory(256L * 1024 * 1024)
+    try {
+        var at = 0L
+        while (at < block.size()) {
+            block.setByte(at, 1)
+            at += 4096
+        }
+        settled("native-256")
+    } finally {
+        block.close()
+    }
+    settled("native-freed")
+    art("full_screen")
+    app.fullPlayer = true
+    settled("full-player") { it.gpuCommittedMb }
+    note("calib done")
 }
 
 // The graphics card cache limit of the window's drawing, in bytes, as Skia

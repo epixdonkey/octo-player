@@ -15,7 +15,7 @@ class SettingsIndexTest {
         val ids = SettingsIndex.all.map { it.id }
         assertEquals(ids.size, ids.toSet().size)
         assertTrue(SettingsIndex.all.all { it.title.isNotBlank() })
-        assertEquals(SettingsIndex.Crossfade, SettingsIndex.byId("crossfade"))
+        assertEquals(SettingsIndex.BetweenSongs, SettingsIndex.byId("crossfade"))
     }
 
     @Test
@@ -37,14 +37,46 @@ class SettingsIndexTest {
     }
 
     @Test
+    fun downloadFormatIsFoundByItsFormats() {
+        listOf("opus", "aac", "codec", "download format").forEach { word -> assertEquals(word, "Download format", titles(word).first()) }
+        assertTrue("Download format" in titles("mp3"))
+        assertEquals(SettingsIndex.DownloadFormat, SettingsIndex.byId("download_format"))
+    }
+
+    @Test
+    fun theDownloadQualityReadsInTheFormat() {
+        assertEquals("128 kbps Opus", app.winters.octo.playback.StreamQuality.Kbps128.downloadLabel(app.winters.octo.playback.DownloadFormat.Opus))
+        assertEquals("320 kbps AAC", app.winters.octo.playback.StreamQuality.Kbps320.downloadLabel(app.winters.octo.playback.DownloadFormat.Aac))
+        assertEquals("Original", app.winters.octo.playback.StreamQuality.Original.downloadLabel(app.winters.octo.playback.DownloadFormat.Mp3))
+    }
+
+    @Test
     fun theTitleComesFirst() {
-        assertEquals(listOf("Crossfade", "Crossfade curve", "Longest blend"), titles("crossfade").take(3))
-        assertEquals("Crossfade", titles("CROSS").first())
+        assertEquals(listOf("Crossfade curve", "Between songs", "Length"), titles("crossfade").take(3))
+        assertEquals("Crossfade curve", titles("CROSS").first())
+    }
+
+    // Between songs answers every word for what plays between two songs,
+    // Smart transitions' among them, and its rows keep their ids.
+    @Test
+    fun betweenSongsAnswersEveryWordForIt() {
+        listOf("smart transitions", "gapless", "automix", "blend", "between songs").forEach { word ->
+            assertEquals(word, "Between songs", titles(word).first())
+        }
+        listOf("crossfade", "mix", "transition", "dj", "smart", "fade").forEach { word ->
+            assertTrue(word, "Between songs" in titles(word))
+        }
+        assertEquals("crossfade", SettingsIndex.BetweenSongs.id)
+        assertTrue(SettingsIndex.all.none { it.id == "smart_transitions" || it.title == "Smart transitions" })
+        assertEquals("Length", SettingsIndex.CrossfadeLength.title)
+        assertEquals(SettingsIndex.CrossfadeLength, SettingsIndex.byId("crossfade_length"))
+        assertTrue("Length" in titles("longest blend"))
+        listOf("crossfade_curve", "filter_sweeps", "match_tempo").forEach { id -> assertTrue(id, SettingsIndex.byId(id) != null) }
     }
 
     @Test
     fun otherWordsFindASetting() {
-        assertEquals("Crossfade", titles("gapless").first())
+        assertEquals("Between songs", titles("gapless").first())
         assertEquals("Speed", titles("semitones").first())
         assertTrue("Speed" in titles("tempo"))
         assertTrue("Loudness" in titles("replaygain"))
@@ -53,9 +85,25 @@ class SettingsIndexTest {
     @Test
     fun searchFindsTheAccentColor() {
         assertEquals("Accent color", titles("accent").first())
-        assertTrue("Accent color" in titles("theme"))
         assertTrue("Accent color" in titles("colour"))
         assertEquals(SettingsPage.Appearance, SettingsIndex.AccentColor.page)
+        // The theme words belong to the theme now.
+        assertTrue("Accent color" !in titles("palette"))
+    }
+
+    @Test
+    fun searchFindsTheTheme() {
+        assertEquals("Theme", titles("theme").first())
+        listOf("light mode", "dark mode", "night", "day", "colors", "palette", "appearance").forEach { word ->
+            assertTrue("$word finds the theme", "Theme" in titles(word))
+        }
+        assertEquals("Theme", titles("palette").first())
+        assertEquals(SettingsPage.Appearance, SettingsIndex.Theme.page)
+        listOf("match", "system", "automatic", "night").forEach { word ->
+            assertTrue("$word finds Match the system", "Match the system" in titles(word))
+        }
+        assertEquals("Match the system", titles("match the system").first())
+        assertEquals(SettingsPage.Appearance, SettingsIndex.MatchSystem.page)
     }
 
     @Test

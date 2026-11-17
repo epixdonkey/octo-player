@@ -14,7 +14,7 @@ enum OctoIcon: String, CaseIterable, Sendable {
     case homeSelected, searchSelected, librarySelected, settings, settingsSelected, cast, castConnected, tv
     case speaker, speakerGroup, headphones, globe, lock, lockOpen, key, sparkle, sync, storage, servers
     case timer, listeners, layout, wifi, camera, qrCode, copy, link, audioQuality, visible, hidden
-    case minimize, maximize, restore, system, keyboard, loudness, balance, crossfade, stop
+    case minimize, maximize, restore, system, keyboard, loudness, balance, crossfade, stop, playlistFolder
 
     /// The SF Symbol drawn for it.
     var symbol: String {
@@ -119,6 +119,8 @@ enum OctoIcon: String, CaseIterable, Sendable {
         case .balance: "dial.medium"
         case .crossfade: "arrow.triangle.merge"
         case .stop: "stop.fill"
+        // A folder of playlists, set apart from the file Folders page's plain folder.
+        case .playlistFolder: "folder.badge.music"
         }
     }
 
@@ -131,18 +133,25 @@ enum OctoIcon: String, CaseIterable, Sendable {
 struct IconView: View {
     let icon: OctoIcon
     var size: CGFloat = 24
-    var color: Color?
+    var color: AnyShapeStyle?
 
     init(_ icon: OctoIcon, size: CGFloat = 24, color: Color? = nil) {
         self.icon = icon
         self.size = size
-        self.color = color
+        self.color = color.map { AnyShapeStyle($0) }
+    }
+
+    /// An icon in a color that resolves where it is drawn, like the theme's words.
+    init<S: ShapeStyle>(_ icon: OctoIcon, size: CGFloat = 24, color: S) {
+        self.icon = icon
+        self.size = size
+        self.color = AnyShapeStyle(color)
     }
 
     var body: some View {
         Image(systemName: icon.symbol)
             .font(.system(size: size * 0.8, weight: icon.bold ? .bold : .regular))
-            .foregroundStyle(color.map { AnyShapeStyle($0) } ?? AnyShapeStyle(.foreground))
+            .foregroundStyle(color ?? AnyShapeStyle(.foreground))
             .frame(width: size, height: size)
             .accessibilityHidden(true)
     }
@@ -151,9 +160,14 @@ struct IconView: View {
 /// The pause sign, `size` points square.
 struct PauseGlyph: View {
     var size: CGFloat = 22
-    var color: Color = .white
+    /// The sign's color; nil takes the theme's words.
+    var color: Color?
 
     var body: some View {
-        IconView(.pause, size: size, color: color)
+        if let color {
+            IconView(.pause, size: size, color: color)
+        } else {
+            IconView(.pause, size: size, color: OctoColor.textPrimary)
+        }
     }
 }

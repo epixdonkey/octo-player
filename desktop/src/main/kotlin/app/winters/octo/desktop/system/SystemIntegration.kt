@@ -1,12 +1,15 @@
 package app.winters.octo.desktop.system
 
+import app.winters.octo.desktop.library.LibraryState
 import app.winters.octo.desktop.pages.openFamilyLink
+import app.winters.octo.server.READ_FAILED_TITLE
 import app.winters.octo.subsonic.parseFamilyLink
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.painter.Painter
@@ -33,10 +36,13 @@ import app.winters.octo.desktop.discord.discordPipes
 import app.winters.octo.desktop.hotkeys.GlobalShortcuts
 import app.winters.octo.desktop.hotkeys.HotkeyAction
 import app.winters.octo.desktop.hotkeys.HotkeyBackend
+import app.winters.octo.desktop.nav.SettingsKey
 import app.winters.octo.desktop.nav.VOLUME_STEP
 import app.winters.octo.desktop.ui.GpuCacheTrim
+import app.winters.octo.desktop.ui.SETTINGS_NOT_SAVED
 import app.winters.octo.desktop.ui.anyOutside
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -71,6 +77,8 @@ class SystemIntegration(
     // Where global shortcuts are claimed; the system's own unless a test
     // hands in a pretend one.
     hotkeys: HotkeyBackend? = null,
+    // Where notices go; the system's own unless a test hands in a pretend one.
+    notifications: Notifier? = null,
 ) : AutoCloseable {
     val controls: SystemMediaControls = when (os) {
         DesktopOs.Windows -> NativeMediaControls.load("System media controls") ?: NoMediaControls()
@@ -105,10 +113,22 @@ class SystemIntegration(
     // The tray's icon, drawn from the vector at the size the tray asks for.
     val trayIcon: Painter? = OctoIconPainter(FlatShape)
 
-    private val notifier: Notifier? = when {
-        os == DesktopOs.Linux -> LinuxNotifier(null)
-        trayAvailable -> TrayNotifier(trayState)
-        else -> null
+    // On Linux the desktop's tray can go away while Octo runs (GNOME
+    // reloading its AppIndicator extension), and Compose's Tray then throws
+    // as it leaves, so there the icon is made by hand and put back when lost.
+    // Windows puts AWT's tray icons back itself when Explorer restarts and
+    // the macOS menu bar stays, so both keep Compose's Tray, which also
+    // shows their notices.
+    private val keptTray = if (os == DesktopOs.Linux && trayAvailable) AwtTray(::onTray) else null
+    private val trayKeeper = keptTray?.let { tray -> TrayKeeper(tray, onGaveUp = ::trayGaveUp).also { keeper -> tray.listen(keeper::hear) } }
+
+    // Whether Octo's icon is in the tray now, to bring a hidden window back from.
+    val trayShowing: Boolean get() = trayKeeper?.showing ?: trayAvailable
+
+    private val notifier: Notifier? = notifications ?: when (noticeRoute(os, trayAvailable)) {
+        NoticeRoute.Desktop -> LinuxNotifier(null)
+        NoticeRoute.Tray -> TrayNotifier(trayState)
+        null -> null
     }
     private val notices = NowPlayingNotices()
 
@@ -141,8 +161,14 @@ class SystemIntegration(
     var focusWindow: () -> Unit = {}
     var quit: () -> Unit = {}
 
-    // Closing the window keeps Octo in the tray, when there is a tray.
-    val closesToTray: Boolean get() = trayAvailable && app.settings.current.system.closeToTray
+    // Closing the window keeps Octo in the tray, when its icon is there.
+    val closesToTray: Boolean get() = closeKeepsInTray(app.settings.current.system.closeToTray, trayShowing)
+
+    // Whether the Mac's Octo menu has a Settings item that Octo answers,
+    // which then takes Cmd+comma from the window.
+    val macSettingsMenu: Boolean = os == DesktopOs.Mac && runCatching {
+        Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.APP_PREFERENCES)
+    }.getOrDefault(false)
 
     // The Windows taskbar button, jump list and starting at sign-in.
     val shell = ShellIntegration(app, os, places.config)
@@ -166,6 +192,13 @@ class SystemIntegration(
                 notice?.let { (title, text) -> notifier?.show(title, text) }
             }
         }
+        tellSettingsHolds()
+        // A read of the library that fails while the window is in the tray says so.
+        app.scope.launch {
+            snapshotFlow { app.library }.collectLatest { store ->
+                store?.state?.collect { state -> if (state is LibraryState.Failed && !windowVisible) notifier?.show(READ_FAILED_TITLE, state.message) }
+            }
+        }
         instance?.onLaunch { args -> app.scope.launch { arrived(args) } }
         // octo:// links open the installed app (macOS knows from the app's details).
         if (System.getProperty(CHECK_PLAY) == null) installedProgram()?.let { program ->
@@ -181,6 +214,15 @@ class SystemIntegration(
         open(parseLaunchArgs(launchArgs))
     }
 
+    // A settings file another program holds is told once per hold; the
+    // banner over the pages says it too, with Try again.
+    internal fun tellSettingsHolds() {
+        app.scope.launch {
+            val holds = SettingsHoldNotices()
+            app.settings.hold.collect { hold -> holds.noticeFor(hold)?.let { notifier?.show(SETTINGS_NOT_SAVED, it) } }
+        }
+    }
+
     // A later launch handed its command line over. One that only plays
     // from the jump list, or starts in the tray, leaves the window be.
     private fun arrived(args: List<String>) {
@@ -191,10 +233,36 @@ class SystemIntegration(
     // On macOS files and links come as events, not on the command line, and
     // a click on the Dock icon should bring a hidden window back. Quitting
     // from the menu or with Cmd+Q goes through the app's own quit, which
-    // saves and lets go of everything, before macOS ends it.
+    // saves and lets go of everything, before macOS ends it. Octo > Settings
+    // opens and leaves Settings as Cmd+comma does, and Octo > About opens
+    // Settings on About, while signed in.
     private fun listenToMac() {
         if (os != DesktopOs.Mac || !Desktop.isDesktopSupported()) return
         val desktop = Desktop.getDesktop()
+        if (macSettingsMenu) {
+            runCatching {
+                desktop.setPreferencesHandler {
+                    app.scope.launch {
+                        if (app.connection != null) {
+                            raise()
+                            app.toggleSettings()
+                        }
+                    }
+                }
+            }
+        }
+        if (desktop.isSupported(Desktop.Action.APP_ABOUT)) {
+            runCatching {
+                desktop.setAboutHandler {
+                    app.scope.launch {
+                        if (app.connection != null) {
+                            raise()
+                            app.openSettings(SettingsKey.About)
+                        }
+                    }
+                }
+            }
+        }
         runCatching { desktop.setOpenFileHandler { event -> app.scope.launch { open(parseLaunchArgs(event.files.map { it.path })) } } }
         runCatching { desktop.setOpenURIHandler { event -> app.scope.launch { raise(); open(parseLaunchArgs(listOf(event.uri.toString()))) } } }
         runCatching { desktop.addAppEventListener(AppReopenedListener { app.scope.launch { raise() } }) }
@@ -356,11 +424,16 @@ class SystemIntegration(
     // Hides the window in the tray where there is one, and to the taskbar
     // where there is not, so it can always be found again.
     private fun putWindowAway() {
-        if (trayAvailable) {
+        if (trayShowing) {
             hideWindow()
         } else {
             (mainWindow as? java.awt.Frame)?.let { it.extendedState = it.extendedState or java.awt.Frame.ICONIFIED }
         }
+    }
+
+    // No tray icon could be kept, so a window hidden in the tray comes back.
+    private fun trayGaveUp() {
+        if (!windowVisible && !miniPlayerOpen) raise()
     }
 
     fun onTray(action: TrayAction) {
@@ -404,7 +477,14 @@ class SystemIntegration(
         val now = nowPlayingOf(state)
         val icon = trayIcon ?: windowIcon
         if (trayAvailable && icon != null) {
-            OctoTray(icon, trayState, now, miniPlayerOpen, ::onTray)
+            val read by remember(app.library) { app.library?.progress ?: MutableStateFlow(null) }.collectAsState()
+            val kept = keptTray
+            val keeper = trayKeeper
+            if (kept != null && keeper != null) {
+                KeptTray(kept, keeper, icon, now, miniPlayerOpen, read.takeIf { !windowVisible })
+            } else {
+                OctoTray(icon, trayState, now, miniPlayerOpen, ::onTray, read.takeIf { !windowVisible })
+            }
         }
         if (miniPlayerOpen) {
             val spot = placeMiniPlayer(app.settings.current.system.miniPlayer, screenAreas())

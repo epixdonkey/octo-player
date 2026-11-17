@@ -14,6 +14,7 @@ enum LibraryPage: Hashable, Codable {
     case recentlyRemoved
     case favorites(FavoriteSegment?)
     case playlist(id: String)
+    case playlistFolder(id: String)
 }
 
 extension LibraryPage {
@@ -31,6 +32,7 @@ extension LibraryPage {
         case .recentlyRemoved: .healthTrash
         case .favorites(let segment): segment == .songs ? .liked : .favorites
         case .playlist: .playlist
+        case .playlistFolder: .playlists
         }
     }
 }
@@ -61,6 +63,7 @@ struct LibraryPageView: View {
         case .recentlyRemoved: RecentlyRemovedPage()
         case .favorites(let segment): FavoritesView(opening: segment)
         case .playlist(let id): PlaylistPage(id: id)
+        case .playlistFolder(let id): PlaylistFolderPage(id: id)
         }
     }
 }
@@ -111,7 +114,7 @@ struct SongsPage: View {
                 }
                 if let sorted {
                     if sorted.items.isEmpty {
-                        EmptyLibraryNote()
+                        CopyAwareNote { EmptyLibraryNote() }
                     } else if let shown {
                         if shown.items.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
@@ -260,7 +263,7 @@ struct SongsPage: View {
             }
             .padding(.leading, 14)
             .frame(minHeight: 44)
-            .glassEffect(Glass.octo, in: .capsule)
+            .octoGlass(Capsule())
             .padding(.horizontal, 20)
             // The filters as one menu button, never a row that scrolls sideways: each quick
             // filter checked while on, a rating, a genre and a decade each in a menu of its own.
@@ -322,14 +325,14 @@ struct GenresPage: View {
                     .padding(.top, pageTopGap)
                 if let genres {
                     if genres.isEmpty {
-                        MutedNote("None of your songs has a genre yet")
+                        CopyAwareNote { MutedNote("None of your songs has a genre yet") }
                     }
                     ForEach(genres, id: \.name) { genre in
                         NavigationLink(value: Route.library(.genre(genre.name))) {
                             HStack(spacing: 12) {
                                 ArtCover(artwork: genre.artwork, size: 48, radius: 6)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(genre.name).font(.octoBodySmall).foregroundStyle(.white).lineLimit(1)
+                                    Text(genre.name).font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary).lineLimit(1)
                                     Text(songsCount(genre.songCount)).font(.octoCaption).foregroundStyle(OctoColor.textMuted)
                                 }
                                 Spacer(minLength: 0)
@@ -680,7 +683,7 @@ struct DownloadsPage: View {
                 if row.state == .downloading {
                     GeometryReader { box in
                         ZStack(alignment: .leading) {
-                            Rectangle().fill(.white.opacity(0.08))
+                            Rectangle().fill(OctoColor.hairline)
                             Rectangle().fill(OctoColor.accent).frame(width: box.size.width * CGFloat(row.progress))
                         }
                     }

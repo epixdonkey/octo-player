@@ -84,6 +84,7 @@ class ServerSwitch @Inject constructor(
     private val sessions: SessionRepository,
     private val handoff: SessionHandoff,
     private val queue: QueueStore,
+    private val legacy: LegacyQueues,
     private val sync: ServerSync,
     private val serverQueue: QueueSync,
     private val listening: ListeningSync,
@@ -94,7 +95,7 @@ class ServerSwitch @Inject constructor(
     private val liveLists: LiveListStore,
     private val offline: OfflineDownloads,
     private val admin: OctoAdmin,
-) {
+) : SignInSwitch {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var started = false
 
@@ -153,12 +154,14 @@ class ServerSwitch @Inject constructor(
         }
     }.await()
 
-    // Signs in and makes the server the one in use. Answers what went wrong,
-    // or the notice to show: the switch's, when another was in use before.
-    suspend fun signIn(request: SignInRequest): Pair<SignInError?, String?> = scope.async {
+    // Signs in and makes the server the one in use: `keptId` names a kept
+    // server signed in to again, brought up to date rather than kept twice.
+    // Answers what went wrong, or the notice to show: the switch's, when
+    // another was in use before.
+    override suspend fun signIn(request: SignInRequest, keptId: String?): Pair<SignInError?, String?> = scope.async {
         val before = (sessions.state.value as? SessionState.SignedIn)?.session
         stoppedMusic = false
-        val failed = sessions.signIn(request)
+        val failed = if (keptId != null) sessions.signInAgain(keptId, request) else sessions.signIn(request)
         if (failed != null) return@async failed to null
         val now = (sessions.state.value as? SessionState.SignedIn)?.session ?: return@async null to null
         val from = before?.takeIf { it.id != now.id }
@@ -209,7 +212,9 @@ class ServerSwitch @Inject constructor(
         listening.noted()
         left?.queue?.let { serverQueue.leaving(it) }
         val next = to ?: PHONE_LIBRARY
-        queue.handOver(from.id, left?.queue, next, keepWhenNone = false)
+        // A queue the app kept the old way for `next` is brought in first.
+        legacy.bringParked(next)
+        queue.handOver(from.id, next, keepWhenNone = false)
         handedOver = true
         // The player waits for the next server's library on its own, even
         // should another switch follow at once.
@@ -224,7 +229,8 @@ class ServerSwitch @Inject constructor(
             handedOver = false
             return
         }
-        bringBack(to, queue.handOver(from, null, to, keepWhenNone = true))
+        legacy.bringParked(to)
+        bringBack(to, queue.handOver(from, to, keepWhenNone = true))
     }
 
     // Once the library of `to` is in place, its queue comes back into the

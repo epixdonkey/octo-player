@@ -104,6 +104,13 @@ class DownloadProgressTest {
     }
 
     @Test
+    fun aForgottenFindOffersItsAddAgain() {
+        // Forgotten, it offers its add again whatever the server last said of it.
+        val forgotten = find("b", "Odd Look").copy(requestedAt = 0, adoptedId = "")
+        assertEquals(DownloadPhase.None, phaseFor(forgotten, DownloadPhase.Adding, NOW))
+    }
+
+    @Test
     fun thePlainStateKeepsAFailureAskable() {
         assertEquals(DownloadState.None, DownloadPhase.None.state)
         assertEquals(DownloadState.Requested, DownloadPhase.Queued.state)

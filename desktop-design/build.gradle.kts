@@ -17,7 +17,7 @@ plugins {
     alias(libs.plugins.compose.multiplatform)
 }
 
-kotlin { jvmToolchain(17) }
+kotlin { jvmToolchain(25) }
 
 // The Android design files that compile unchanged on the desktop. A file
 // added here must not import anything from Android; the build fails loudly
@@ -44,6 +44,7 @@ val sharedDesignFiles = listOf(
     "NowPlayingBars.kt",
     "OctoColors.kt",
     "OctoMotion.kt",
+    "OctoPalette.kt",
     "OctoSwitch.kt",
     "OctoTokens.kt",
     "PlaylistArt.kt",
@@ -59,10 +60,16 @@ val shareDesign by tasks.registering(Sync::class) {
 }
 
 // The phone app's icon vectors (Phosphor Icons), packaged as resources
-// under octo-icons/ with their licence.
+// under octo-icons/ with their licence, and the list they are made from
+// (each file's Phosphor weight and scale, from which its stroke width is
+// known).
 val shareIcons by tasks.registering(Sync::class) {
     from(rootProject.file("design/src/main/res/drawable")) {
         include("sym_*.xml")
+        into("octo-icons")
+    }
+    from(rootProject.file("tools/icons")) {
+        include("icons.json")
         into("octo-icons")
     }
     from(rootProject.file("design/licenses")) {
@@ -96,5 +103,10 @@ dependencies {
     api(libs.haze.blur)
     // The playlist covers' design, which PlaylistArt.kt paints.
     implementation(project(":shared:core"))
+    // Reading the icon list, and the one worker that fits icons to pixels.
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
+    // Skia's native library for this machine, so the icon tests can draw.
+    testImplementation(compose.desktop.currentOs)
 }

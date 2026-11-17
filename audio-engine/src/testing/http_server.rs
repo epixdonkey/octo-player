@@ -70,7 +70,7 @@ pub struct TestServer {
     ranges: Arc<Mutex<Vec<u64>>>,
     requests: Arc<AtomicUsize>,
     stopped: Arc<AtomicBool>,
-    targets: Arc<Mutex<Vec<String>>>,
+    asked: Arc<Mutex<Vec<Asked>>>,
 }
 
 impl TestServer {
@@ -97,9 +97,9 @@ impl TestServer {
         let ranges = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::new(AtomicUsize::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
-        let targets = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let body = Arc::new(body);
-        let (log, count, stop, asked) = (ranges.clone(), requests.clone(), stopped.clone(), targets.clone());
+        let (log, count, stop, asked) = (ranges.clone(), requests.clone(), stopped.clone(), seen.clone());
         let scheme = if tls.is_some() { "https" } else { "http" };
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -122,7 +122,7 @@ impl TestServer {
                 });
             }
         });
-        Self { scheme, port, ranges, requests, stopped, targets }
+        Self { scheme, port, ranges, requests, stopped, asked: seen }
     }
 
     pub fn url(&self) -> String {
@@ -140,7 +140,12 @@ impl TestServer {
 
     /// The path and query of each request, in order.
     pub fn targets_asked(&self) -> Vec<String> {
-        self.targets.lock().unwrap().clone()
+        self.asked.lock().unwrap().iter().map(|a| a.target.clone()).collect()
+    }
+
+    /// Every request so far, in order, with its headers.
+    pub fn asked(&self) -> Vec<Asked> {
+        self.asked.lock().unwrap().clone()
     }
 }
 
@@ -176,9 +181,10 @@ fn serve(
     log: &Mutex<Vec<u64>>,
     count: &AtomicUsize,
     stopped: &AtomicBool,
-    targets: &Mutex<Vec<String>>,
+    asked: &Mutex<Vec<Asked>>,
 ) {
     let mut range = None;
+    let mut request = Asked { target: String::new(), headers: Vec::new() };
     {
         let mut reader = BufReader::new(&mut stream);
         let mut line = String::new();
@@ -190,13 +196,15 @@ fn serve(
             }
             if first {
                 first = false;
-                if let Some(target) = line.split_whitespace().nth(1) {
-                    targets.lock().unwrap().push(target.to_string());
-                }
+                request.target = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+                continue;
             }
             let trimmed = line.trim_end();
             if trimmed.is_empty() {
                 break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                request.headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
             }
             let lower = trimmed.to_ascii_lowercase();
             if let Some(value) = lower.strip_prefix("range:") {
@@ -207,6 +215,7 @@ fn serve(
             }
         }
     }
+    asked.lock().unwrap().push(request);
     let nth = count.fetch_add(1, Ordering::SeqCst);
     if let Some(start) = range {
         log.lock().unwrap().push(start);
@@ -292,6 +301,12 @@ type Script = dyn Fn(&Asked, &mut TcpStream, &AtomicBool) + Send + Sync;
 /// endless streams, playlists that change and servers that misbehave. The
 /// script is handed a flag that is set once the server is dropped, so an
 /// endless answer can stop.
+///
+/// It answers one request a connection and then hangs up, so an answer with
+/// a length says `Connection: close`. Without it the client keeps the
+/// connection for its next request, and when that request reaches the
+/// socket as the server closes it, the client is sent a reset in place of
+/// an answer.
 pub struct ScriptServer {
     port: u16,
     asked: Arc<Mutex<Vec<Asked>>>,
@@ -361,4 +376,154 @@ fn read_request(stream: &mut TcpStream) -> Option<Asked> {
         }
     }
     Some(Asked { target, headers })
+}
+
+/// A certificate authority for client certificates, made for the tests.
+pub struct ClientCa {
+    /// Its own certificate's DER, for a server to trust.
+    pub der: Vec<u8>,
+    issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
+}
+
+/// A client certificate a `ClientCa` issued.
+pub struct ClientIdentity {
+    /// The client's own certificate, then the authority's, each in DER.
+    pub chain: Vec<Vec<u8>>,
+    /// Its private key as PKCS#8 DER.
+    pub key: Vec<u8>,
+}
+
+impl ClientCa {
+    pub fn generate() -> Self {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name.push(rcgen::DnType::CommonName, "Octo test clients");
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        Self { der, issuer: rcgen::Issuer::new(params, key) }
+    }
+
+    /// A client certificate for `name`, with a new key made for `alg`.
+    pub fn issue(&self, name: &str, alg: &'static rcgen::SignatureAlgorithm) -> ClientIdentity {
+        let key = rcgen::KeyPair::generate_for(alg).unwrap();
+        let mut params = rcgen::CertificateParams::default();
+        params.distinguished_name.push(rcgen::DnType::CommonName, name);
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let leaf = params.signed_by(&key, &self.issuer).unwrap();
+        ClientIdentity { chain: vec![leaf.der().to_vec(), self.der.clone()], key: key.serialize_der() }
+    }
+}
+
+/// An HTTPS server that keeps each connection open for the next request,
+/// can require a client certificate, and writes down, for every request,
+/// the connection it came on and the certificate the client showed there.
+pub struct ClientAuthServer {
+    port: u16,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+/// One request a `ClientAuthServer` answered.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seen {
+    /// The connection it came on, counted from 0 in the order they came.
+    pub connection: usize,
+    /// The client's own certificate on that connection, in DER.
+    pub leaf: Option<Vec<u8>>,
+}
+
+impl ClientAuthServer {
+    /// Answers every request with `body`, showing `certificate` and speaking
+    /// only `version`. With `clients`, a client must show a certificate
+    /// issued by one of them, or one of them itself; with none, no client is
+    /// asked for one.
+    pub fn start(
+        body: Vec<u8>,
+        certificate: &SelfSigned,
+        clients: Option<&[Vec<u8>]>,
+        version: &'static rustls::SupportedProtocolVersion,
+    ) -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[version])
+            .unwrap();
+        let builder = match clients {
+            Some(clients) => {
+                let mut roots = rustls::RootCertStore::empty();
+                for client in clients {
+                    roots.add(client.clone().into()).unwrap();
+                }
+                let verifier =
+                    rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                        .build()
+                        .unwrap();
+                builder.with_client_cert_verifier(verifier)
+            }
+            None => builder.with_no_client_auth(),
+        };
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key.clone());
+        let config =
+            Arc::new(builder.with_single_cert(vec![certificate.der.clone().into()], key.into()).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (log, body) = (seen.clone(), Arc::new(body));
+        thread::spawn(move || {
+            for (connection, stream) in listener.incoming().flatten().enumerate() {
+                let (config, log, body) = (config.clone(), log.clone(), body.clone());
+                thread::spawn(move || {
+                    let Ok(conn) = rustls::ServerConnection::new(config) else { return };
+                    serve_kept(rustls::StreamOwned::new(conn, stream), connection, &body, &log);
+                });
+            }
+        });
+        Self { port, seen }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn url(&self) -> String {
+        format!("https://127.0.0.1:{}/song.flac", self.port)
+    }
+
+    /// Every request answered so far, in order.
+    pub fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+// Answers request after request on one connection until the client goes,
+// writing each down with the certificate the client showed. The first read
+// finishes the handshake, so a client the server turns down is never
+// written down.
+fn serve_kept(
+    mut stream: rustls::StreamOwned<rustls::ServerConnection, TcpStream>,
+    connection: usize,
+    body: &[u8],
+    seen: &Mutex<Vec<Seen>>,
+) {
+    while read_head(&mut stream) {
+        let leaf = stream.conn.peer_certificates().and_then(|chain| chain.first()).map(|c| c.to_vec());
+        seen.lock().unwrap().push(Seen { connection, leaf });
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+        let answered = stream.write_all(head.as_bytes()).is_ok() && stream.write_all(body).is_ok();
+        if !answered || stream.flush().is_err() {
+            return;
+        }
+    }
+}
+
+// Reads a request's head to its blank line, a byte at a time so nothing of
+// the next request is taken with it. False once the client is gone.
+fn read_head(stream: &mut impl Read) -> bool {
+    let mut last = [0u8; 4];
+    let mut byte = [0u8; 1];
+    while last != *b"\r\n\r\n" {
+        if !matches!(stream.read(&mut byte), Ok(1)) {
+            return false;
+        }
+        last = [last[1], last[2], last[3], byte[0]];
+    }
+    true
 }

@@ -1,4 +1,4 @@
-**Family playlists** take your songs, **charts come from any country**, and every choice you make shows clearly.
+**Automix**, **themes**, **big libraries that fit on your phone**, **playlist folders**, **songs found online in your playlists**, **Try another version**, **your own Download format**, **hearts get the version you heard**, and **Android Auto gets the whole app**.
 
 ## Sound
 
@@ -6,24 +6,52 @@
 
 ## Library
 
-- **Family playlists in Add to playlist.** With Family on, the family's playlists show on your Playlists page and in Add to playlist, and you can add songs and take them out. Each one says By Family. Taking a song out takes out exactly the one you picked.
-- What you can do with a family playlist follows the family's rules: a manager can rename or delete it, its order is the family's, and someone who can't change it sees it read only.
-- **Charts from any country.** Tap the country button on Charts and pick a country. Just look here shows its charts on this page only, and nothing is saved.
-- **Use Japan for my charts** (or any country) makes it yours, so Popular right now, your other chart playlists and Home follow it in every app. Same as the server goes back to your server's country.
-- **Also add a country's playlists** for up to three countries, like Popular right now · Japan, in every app you use with Octo.
-- While another country's charts are still loading, Charts keeps loading and asks again by itself, instead of telling you to try later.
+- **Big libraries fit.** Copying your server's library takes the same small amount of memory however big it is, and Home, lists, playlists, the phone scan and Android Auto read it a page at a time, so a library of hundreds of thousands of songs no longer closes the app.
+- **A copy shows how far it is**, you can play while it saves, and a long one keeps going with a notification when you leave the app.
+- Covers kept in memory take less room, so a big library leaves more for the rest of the app.
+- When the phone is short of room for a copy or for this update, Octo says how much to free instead of failing.
+- Your likes, favorite albums and artists, and Home pins stay with their songs when the server files them anew.
+- **A heart gets the version you heard.** When you heart a song, your Octo server downloads the best copy of the take you were listening to, checked by its sound, not just its name. A remaster of it counts, but a live take, a cover or an edit doesn't.
+- **Downloads that need you say so.** When the server can't prove a version yet, the song waits and says why, like "Play it once so Octo can keep the version you hear". Keep anyway keeps the copy as it is.
+- **Albums too.** A hearted album keeps the tracks it can prove and holds the rest, each one proven by a play or kept with Keep these anyway.
+- A download that waits for you carries the small accent dot instead of a busy ring, and Server downloads under Library says how many are on their way and how many wait for you.
+- A song kept while Lidarr is still downloading its artist plays right away and joins your library once Lidarr's download is done.
+- **Album search works where it used to come back empty.** In countries where the music catalog hides albums from searches, like movie soundtracks, Octo finds them through Apple's catalog instead, and a whole album downloads.
+- On a partly held album, saving it to your phone counts only the songs it saves.
+- **A song you delete can come back.** Search drops its check mark once your library no longer has it, and hearting it again downloads it again.
+- **Playlist folders.** Make folders for your playlists, put folders inside folders up to 4 deep, and file playlists with Move to folder or a folder's Add playlists. Your Octo server keeps them, so every Octo app you sign in to shows the same folders, and folders made with no server stay on your phone.
+- **Songs found online go in your playlists.** Add a song Octo found online to any of your own playlists and it keeps its place. Once it's downloaded into your library, your copy takes the same spot.
+- **Library upkeep.** Review, Duplicates and Octo's library action playlists sit together in their own group at the end of Playlists, closed until you open it, with a line saying when Review or Duplicates has songs.
+- Imported playlists show in Playlists with your own, and can go in folders.
+- A playlist changed on two devices keeps both sets of changes. If one side changed before this update and both changed since, your phone's version is saved beside it as "(from this phone)", so nothing is lost.
+- **Your server's songs are never offered as found online.** A song added to your library since the phone last copied it, or still on its way in a first copy, shows and plays as yours in radio, stations, lists and its album, with its heart and no add button, and the phone brings it into your library on its own.
 
 ## Playback
 
-- **Adding songs while casting** no longer closes the app or stops the cast.
-- **Choose what a swipe right does** in Settings > Playback > Queue: Play next, Add to queue, or Off. Autoplay sits in the same group.
-- **Every Play next and Add to queue shows a message with Undo**, from a swipe, a song's menu, an album or playlist menu, or the selection bar. Picking several songs says how many went in, and Undo takes them all back out.
+- **Try another version.** When a song found online plays the wrong take, like a live one, a remix or a sped-up edit, pick another from Try another version in the player's menu. It plays at once from the start, your server keeps it for everyone on every device, and a heart downloads the version you picked. Go back to Octo's pick undoes it. Needs Octo server 2026.11.15.
+- **Automix is now its own choice next to Crossfade and is on by default:** songs blend where they meet best, and a quiet intro plays under the end of the song before it. If you never changed Crossfade, or turned it off without changing its other settings, Automix is now on. Gapless is under Between songs. A Crossfade setup you chose stays as it was. Automix now picks its own blend lengths. Match tempo is now on for Automix; turn it off under Between songs if you prefer.
+- **Android Auto gets the whole app:** Home, Radio, Playlists and Library tabs, as on your phone, with Made for you, your server's stations, charts and stations near you.
+- Android Auto's Playlists tab shows your playlist folders, each opening to its folders and playlists.
+- Search in the car shows your library first, then what Octo found outside it, and songs from outside your library play from the car.
+- Lists and albums open to their songs, every album of a big library sits under its letter, and playlist covers look as they do on your phone.
+- Start radio and Play next on songs, in cars with Android built in.
+- **Android 13 no longer closes the app** when you open the player.
+- A stream that breaks off, or whose server lets go of the file part way, picks up where it was instead of skipping the song.
 
 ## Server
 
-- Family playlists need Family turned on in your Octo server.
-- Charts from other countries need an Octo server with chart countries.
-- When MusicBrainz is down, imports say Waiting for MusicBrainz: songs it has to check wait, and the rest keep coming.
+- **Servers behind a sign-in page work.** If your server sits behind Authentik, Authelia or Cloudflare Access, Octo signs in through it, and when the sign-in page turns Octo away, Octo names it instead of saying the server can't be reached. A sign-in page is never played or kept as a song.
+- **A clearer sign-in page.** Your server and how you sign in come first, and a sign-in page, a home address, the method, headers and a certificate wait under Advanced. When a sign-in page turns Octo away, Advanced opens on its fields with the reason under them.
+- **A family link starts clean.** A link to another server brings nothing of the last one with it, such as its headers or its certificate, and a link that arrives while you are signing in leaves that sign-in as it is.
+- **Certificates from eMudhra's compromised keys are refused**, so no one can pose as your server with one. Octo says so when a server uses one.
+- **Servers with their own certificate authority work.** If you installed your authority's certificate on the phone (step-ca, say), Octo trusts your server's certificates like any other, so short ones renewed every day keep playing.
+- **A changed certificate is asked about again.** When a server whose certificate you trusted shows a new one, Octo asks with the new fingerprint instead of failing every song until you sign in again, and the song plays once you trust it. A renewal that keeps the same key needs no question.
+- **Music goes to the shared library:** when your family's owner sends your songs there, your plan on the Family page says so instead of showing your own library's size. Needs Octo server 2026.11.15.
+- Hearts that get the version you heard need Octo server 2026.11.13 or newer.
+- Playlist folders kept by your server, songs found online in playlists and Try another version need Octo server 2026.11.15.
+- Imports waiting for Mornye's check say so, and say when they will go on. Health names Mornye and octo-sonic, and Mornye's row offers Pass on the dashboard while its check is paused.
+- A higher quality copy that waits says the server's own words for why.
+- On the Octo admin screen, recent downloads show their covers, served by your Octo server, and the server's music catalog check shows by name.
 
 ## Lyrics
 
@@ -31,18 +59,19 @@
 
 ## Offline
 
-- Offline listening works as before. Nothing changed here in this update.
+- **Choose your Download format.** At a smaller Download quality, songs are saved as Opus (best sound for its size, the new default for everyone), AAC or MP3. Settings > Streaming and downloads > Download format.
+- A song that's already small enough downloads as it is, so it's never made worse.
+- Downloads are named and labeled by what really arrived, and AAC is saved as an M4A that knows its own length.
+- Songs you downloaded before stay downloaded and keep playing. Nothing is downloaded again.
 
 ## Everyday touches
 
-- **The choice you made always shows.** In every set of options, menu, sort and filter, the chosen one is filled with your accent color and has a check. A row of options that can't fit becomes one button that opens them.
-- **Chart names on covers are never cut.** A long name drops the small lines under it first, then gets smaller, and a name that still can't fit leaves the cover to its artwork.
-- **Cleaner page tops.** Pages keep everything on two lines: the name, then one line with the sort, a dropdown or two, and round Play, Shuffle and More. The rest, like Keep downloaded, Share and Remove all, is in More.
-- A tap that lands just as a message goes away no longer presses what was under it.
-- The status bar is frosted, so the page under it stays readable.
-- Country lists have a search field: type part of a name, or a two-letter code like JP. Live radio's country list has it too.
-- Undo in a message is a clear button now.
+- A refused download's reason wraps with the row's words instead of being cut off.
+- An album's download log no longer offers Find songs, since an album is no one song.
+- Fetching songs ahead stops cleanly, and the memory of songs already taken in no longer grows with every song shown.
 
 ## Settings
 
-- A setting's answer takes only the room it needs, so its name and note stay on one line more often.
+- **Themes.** Pick Octo, Moss, Dusk, Daylight or Paper, or let Octo match the system's light and dark. Every screen draws in the theme's colors, and backups keep your theme.
+- Change password names each of its fields, and its button waits until all three are filled in.
+- Backups of a big library save and restore a page at a time.

@@ -32,20 +32,25 @@ struct ButtonLabel: View {
     var icon: OctoIcon?
     var size: ButtonSize = .large
     var loading = false
-    var color: Color = .white
+    /// The words and icon; nil takes the theme's words.
+    var color: Color?
+    @Environment(\.octoPalette) private var palette
+    /// The icon grows and shrinks with the text size, as the words beside it do.
+    @ScaledMetric(relativeTo: .footnote) private var iconScale: CGFloat = 1
 
     var body: some View {
+        let ink = color ?? palette.color(.textPrimary)
         ZStack {
             HStack(spacing: 8) {
-                if let icon { IconView(icon, size: CGFloat(size.iconSize), color: color) }
+                if let icon { IconView(icon, size: CGFloat(size.iconSize) * iconScale, color: ink) }
                 Text(text)
                     .font(.octo(CGFloat(size.fontSize), .semibold, .footnote))
-                    .foregroundStyle(color)
+                    .foregroundStyle(ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             .opacity(loading ? 0 : 1)
-            if loading { Spinner(size: CGFloat(size.iconSize), color: color) }
+            if loading { Spinner(size: CGFloat(size.iconSize), color: ink) }
         }
         .padding(.horizontal, CGFloat(size.padding))
     }
@@ -66,6 +71,7 @@ struct AccentButton: View {
     var loading = false
     var fillWidth = false
     let action: () -> Void
+    @Environment(\.octoPalette) private var palette
 
     init(_ text: String, icon: OctoIcon? = nil, size: ButtonSize = .large, dense: Bool = false, tonal: Bool = false,
          bright: Bool = false, enabled: Bool = true, loading: Bool = false, fillWidth: Bool = false, action: @escaping () -> Void) {
@@ -82,21 +88,21 @@ struct AccentButton: View {
     }
 
     var body: some View {
-        let fill = bright ? OctoPalette.accent : tonal ? OctoPalette.accentTonal : OctoPalette.accentFill
+        let fill = bright ? palette.accents.accent : tonal ? palette.accents.tonal : palette.accents.fill
         Button(action: action) {
-            ButtonLabel(text: text, icon: icon, size: size, loading: loading, color: Color(contentColorFor(fill)))
+            ButtonLabel(text: text, icon: icon, size: size, loading: loading, color: Color(argb: contentArgbFor(fill)))
                 .frame(maxWidth: fillWidth ? .infinity : nil)
                 .frame(height: CGFloat(dense ? size.dense : size.height))
                 .contentShape(Capsule())
         }
         .buttonStyle(PressScale())
-        .octoGlass(Capsule(), film: Color(fill), interactive: true)
+        .octoGlass(Capsule(), film: Color(argb: fill), interactive: true)
         .opacity(enabled ? 1 : OctoInkColor.disabled)
         .disabled(!enabled || loading)
     }
 }
 
-/// The quieter button: lit glass with white words. `tint` lays a fifth of a color into its film.
+/// The quieter button: lit glass with the theme's words. `tint` lays a fifth of a color into its film.
 struct GlazeButton: View {
     let text: String
     var icon: OctoIcon?
@@ -129,27 +135,105 @@ struct GlazeButton: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(PressScale())
-        .octoGlass(Capsule(), film: tint.map { $0.opacity(0.2) } ?? OctoColor.glazeFilm, interactive: true)
+        .octoGlass(Capsule(), film: tint.map { $0.opacity(0.2) }, interactive: true)
         .opacity(enabled ? 1 : OctoInkColor.disabled)
         .disabled(!enabled || loading)
     }
 }
 
+/// A question's two answers, the main one first and the other (Cancel) second: side by side while
+/// both fit at their own widths, the main one widened toward the other's width as far as the row
+/// allows, so it never reads as the lesser answer; stacked at the row's full width, the main one on
+/// top, where they do not fit side by side (long words, or large text on a narrow phone), so neither
+/// is cut. Each answer is drawn to the width it is given (`fillWidth`).
+struct AnswerRow: Layout {
+    var gap: CGFloat = 10
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard subviews.count == 2 else { return .zero }
+        let placed = placement(proposal, subviews)
+        let main = subviews[0].sizeThatFits(ProposedViewSize(width: placed.main, height: nil))
+        let other = subviews[1].sizeThatFits(ProposedViewSize(width: placed.other, height: nil))
+        if placed.stacked { return CGSize(width: placed.main, height: main.height + gap + other.height) }
+        return CGSize(width: placed.main + gap + placed.other, height: max(main.height, other.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 2 else { return }
+        let placed = placement(proposal, subviews)
+        let mainOffer = ProposedViewSize(width: placed.main, height: nil)
+        let otherOffer = ProposedViewSize(width: placed.other, height: nil)
+        let main = subviews[0].sizeThatFits(mainOffer)
+        let other = subviews[1].sizeThatFits(otherOffer)
+        if placed.stacked {
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY), proposal: mainOffer)
+            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + main.height + gap), proposal: otherOffer)
+        } else {
+            let height: CGFloat = max(main.height, other.height)
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY + (height - main.height) / 2), proposal: mainOffer)
+            subviews[1].place(at: CGPoint(x: bounds.minX + placed.main + gap, y: bounds.minY + (height - other.height) / 2),
+                              proposal: otherOffer)
+        }
+    }
+
+    /// Where the two go in the width offered, from each one's own width.
+    private func placement(_ proposal: ProposedViewSize, _ subviews: Subviews) -> (stacked: Bool, main: CGFloat, other: CGFloat) {
+        let room: Double? = proposal.width.flatMap { $0.isFinite ? Double($0) : nil }
+        let placed = answerPlacement(main: Double(subviews[0].sizeThatFits(.unspecified).width),
+                                     other: Double(subviews[1].sizeThatFits(.unspecified).width),
+                                     gap: Double(gap), room: room)
+        return (placed.stacked, CGFloat(placed.main), CGFloat(placed.other))
+    }
+}
+
+/// Lesser ways stacked on the row's trailing edge as one block: each as wide as the widest, never
+/// wider than the row, so their left edges line up too. Each is drawn to the width it is given
+/// (`fillWidth`).
+struct TrailingColumn: Layout {
+    var gap: CGFloat = 12
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = columnWidth(proposal, subviews)
+        let heights = subviews.map { $0.sizeThatFits(ProposedViewSize(width: width, height: nil)).height }
+        let height = heights.reduce(0, +) + gap * CGFloat(max(subviews.count - 1, 0))
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let width = columnWidth(proposal, subviews)
+        let offer = ProposedViewSize(width: width, height: nil)
+        var y = bounds.minY
+        for subview in subviews {
+            subview.place(at: CGPoint(x: bounds.maxX - width, y: y), proposal: offer)
+            y += subview.sizeThatFits(offer).height + gap
+        }
+    }
+
+    private func columnWidth(_ proposal: ProposedViewSize, _ subviews: Subviews) -> CGFloat {
+        let widest = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
+        guard let room = proposal.width else { return widest }
+        return min(widest, room)
+    }
+}
+
 /// A small text button for a lesser action beside a title, like "See all" or "Clear all": no
-/// border and no fill.
+/// border and no fill. `font` sets it in the words beside it instead, as under a list row's own
+/// lines.
 struct QuietButton: View {
     let text: String
+    var font: Font = .octoLabel
     let action: () -> Void
 
-    init(_ text: String, action: @escaping () -> Void) {
+    init(_ text: String, font: Font = .octoLabel, action: @escaping () -> Void) {
         self.text = text
+        self.font = font
         self.action = action
     }
 
     var body: some View {
         Button(action: action) {
             Text(text)
-                .font(.octoLabel)
+                .font(font)
                 .foregroundStyle(OctoColor.textSecondary)
                 .lineLimit(1)
                 .padding(.horizontal, 10)
@@ -164,7 +248,7 @@ struct QuietButton: View {
 private struct QuietPress: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(Capsule().fill(Color.white.opacity(configuration.isPressed ? 0.10 : 0)))
+            .background(Capsule().fill(OctoColor.textPrimary.opacity(configuration.isPressed ? 0.10 : 0)))
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
@@ -184,7 +268,7 @@ private struct ChromePress: ButtonStyle {
                     if active {
                         GlazeSelected(shape: Capsule())
                     } else if pressed {
-                        Circle().fill(Color.white.opacity(0.10))
+                        Circle().fill(OctoColor.textPrimary.opacity(0.10))
                     }
                 }
             }
@@ -219,7 +303,7 @@ struct ChromeButton: View {
             plays += 1
             action()
         } label: {
-            IconView(icon, size: 18, color: .white)
+            IconView(icon, size: 18, color: OctoColor.textPrimary)
                 .iconAccent(accent, trigger: plays)
                 .frame(width: inGroup ? 30 : 38, height: 38)
                 .background {
@@ -262,14 +346,16 @@ struct ChromeGroup<Content: View>: View {
 /// The turning arc: 270 degrees, once every 900 ms, its stroke 12% of its size.
 struct Spinner: View {
     var size: CGFloat = 18
-    var color: Color = .white
+    /// The arc's color; nil takes the theme's words.
+    var color: Color?
+    @Environment(\.octoPalette) private var palette
 
     var body: some View {
         TimelineView(.animation) { time in
             let turn = time.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.9) / 0.9
             Circle()
                 .trim(from: 0, to: 0.75)
-                .stroke(color, style: StrokeStyle(lineWidth: size * 0.12, lineCap: .round))
+                .stroke(color ?? palette.color(.textPrimary), style: StrokeStyle(lineWidth: size * 0.12, lineCap: .round))
                 .rotationEffect(.degrees(turn * 360))
                 .padding(size * 0.06)
         }
@@ -281,9 +367,12 @@ struct Spinner: View {
 /// The waiting spinner for a page loading: an accent arc that grows and shrinks as it turns.
 struct LoadingSpinner: View {
     var size: CGFloat = 28
-    var color: Color = OctoColor.accent
+    /// The arc's color; nil takes the accent.
+    var color: Color?
+    @Environment(\.octoPalette) private var palette
 
     var body: some View {
+        let color = color ?? palette.color(.accent)
         TimelineView(.animation) { time in
             let t = time.date.timeIntervalSinceReferenceDate
             // One grow-and-shrink every 1.333 seconds, the whole arc turning meanwhile.
@@ -311,7 +400,7 @@ extension View {
 
     /// A glow behind an icon while `lit`: a wide soft copy and a close one, fading in and out
     /// over 300 ms.
-    func iconGlow(_ lit: Bool, color: Color = .white) -> some View {
+    func iconGlow(_ lit: Bool, color: Color? = nil) -> some View {
         modifier(IconGlow(lit: lit, color: color))
     }
 }
@@ -348,8 +437,9 @@ private struct IconAccentPlayer<T: Equatable>: ViewModifier {
 
 private struct IconGlow: ViewModifier {
     let lit: Bool
-    let color: Color
+    let color: Color?
     @Environment(\.motionScale) private var motion
+    @Environment(\.octoPalette) private var palette
 
     func body(content: Content) -> some View {
         content
@@ -358,7 +448,7 @@ private struct IconGlow: ViewModifier {
                     content.blur(radius: 10).opacity(0.6)
                     content.blur(radius: 3).opacity(0.7)
                 }
-                .foregroundStyle(color)
+                .foregroundStyle(color ?? palette.color(.textPrimary))
                 .opacity(lit ? 1 : 0)
                 .animation(.octoTween(OctoDuration.neutral, scale: motion), value: lit)
                 .allowsHitTesting(false)

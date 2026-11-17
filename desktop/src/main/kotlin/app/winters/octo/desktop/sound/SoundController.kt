@@ -11,6 +11,8 @@ import app.winters.octo.desktop.settings.SavedCurve
 import app.winters.octo.desktop.settings.SettingsStore
 import app.winters.octo.desktop.settings.SoundPrefs
 import app.winters.octo.playback.Pace
+import app.winters.octo.playback.automixSettingsOf
+import app.winters.octo.playback.crossfadeMsOf
 import app.winters.octo.playback.paceOf
 import app.winters.octo.sound.EqPreset
 import app.winters.octo.sound.EqPresets
@@ -48,26 +50,26 @@ data class EngineSound(
     val pace: Pace,
 )
 
-// The longest blend the crossfade setting allows, and where it starts
-// when crossfade is turned on.
-const val LONGEST_BLEND_SECONDS = 16
-const val SHORTEST_BLEND_SECONDS = 2
-const val DEFAULT_BLEND_SECONDS = 8
-
+// What the engine is told, from the settings and the device playing. The
+// blends come from the Between songs choice as on every app: none for
+// Gapless, Crossfade's own length and curve, or Automix's planned blends
+// with its longest intro.
 fun engineSound(settings: AppSettings, device: String?): EngineSound {
     val sound = soundFor(settings.sound, device)
     val playback = settings.playback
+    val blends = automixSettingsOf(playback.betweenSongs, playback.crossfadeLength, playback.crossfadeCurve, playback.filterSweeps, playback.matchTempo)
     return EngineSound(
         eq = sound.engineEq(),
         replayGain = sound.engineReplayGain(),
         dsp = sound.engineDsp(),
-        crossfadeMs = playback.crossfadeSeconds.coerceIn(0, LONGEST_BLEND_SECONDS) * 1_000,
+        crossfadeMs = crossfadeMsOf(playback.betweenSongs, playback.crossfadeLength).toInt(),
         automix = AutomixSettings(
-            smartTransitions = playback.smartTransitions,
-            filterSweeps = playback.filterSweeps,
-            matchTempo = playback.matchTempo,
-            maxOverlapMs = (playback.crossfadeSeconds.coerceIn(0, LONGEST_BLEND_SECONDS) * 1_000).toUInt(),
-            fadeCurve = playback.crossfadeCurve.engine(),
+            smartTransitions = blends.smart,
+            filterSweeps = blends.filterSweeps,
+            matchTempo = blends.beatMatch,
+            maxOverlapMs = blends.maxOverlapMs.toUInt(),
+            fadeCurve = blends.fadeCurve.engine(),
+            longestIntroMs = blends.longestIntroMs.toUInt(),
         ),
         pace = paceOf(playback.speed, playback.keepPitch, playback.pitchSemitones),
     )
@@ -81,20 +83,29 @@ fun engineSound(settings: AppSettings, device: String?): EngineSound {
 class SoundController(private val target: SoundTarget, private val settings: SettingsStore, private val scope: CoroutineScope) {
     private var applied: EngineSound? = null
 
-    // The settings as a drag has left them, ahead of the saved ones: heard
-    // at once, while the file is written at most every SAVE_EVERY_MS.
-    private val draft = MutableStateFlow<SoundSettings?>(null)
+    // The settings as a drag has left them, ahead of the saved ones, with
+    // the saved set they belong to: heard at once while that set is the one
+    // in use, while the file is written at most every SAVE_EVERY_MS.
+    private class Draft(val key: String, val sound: SoundSettings)
+
+    private val draft = MutableStateFlow<Draft?>(null)
     private var pending: ((SoundSettings) -> SoundSettings)? = null
     private var writer: Job? = null
 
+    // The drag's settings while its set is the one in use; after sound moved
+    // to another output, that output's own.
+    private fun shownSound(s: AppSettings, device: String?, moving: Draft?): SoundSettings? =
+        moving?.takeIf { it.key == soundKey(s.sound, device) }?.sound
+
     // The set the Sound page shows and changes.
-    val current: StateFlow<SoundSettings> = combine(settings.state, target.deviceKey, draft) { s, device, moving -> moving ?: soundFor(s.sound, device) }
+    val current: StateFlow<SoundSettings> = combine(settings.state, target.deviceKey, draft) { s, device, moving -> shownSound(s, device, moving) ?: soundFor(s.sound, device) }
         .stateIn(scope, SharingStarted.Eagerly, soundFor(settings.current.sound, target.deviceKey.value))
 
     init {
         scope.launch {
             combine(settings.state, target.deviceKey, draft) { s, device, moving ->
-                val shown = if (moving == null) s else s.copy(sound = s.sound.copy(profiles = s.sound.profiles + (soundKey(s.sound, device) to moving)))
+                val heard = shownSound(s, device, moving)
+                val shown = if (heard == null) s else s.copy(sound = s.sound.copy(profiles = s.sound.profiles + (soundKey(s.sound, device) to heard)))
                 engineSound(shown, device)
             }.collect(::apply)
         }
@@ -102,30 +113,43 @@ class SoundController(private val target: SoundTarget, private val settings: Set
 
     // A change from a moving pointer: heard and shown at once, saved at
     // most every SAVE_EVERY_MS, and once more by `settle`. Each edit sets
-    // values outright, so saving only the latest loses nothing.
+    // values outright, so saving only the latest loses nothing. The drag
+    // keeps to the set it started on, even if sound moves to another output
+    // before it is let go.
     fun preview(change: (SoundSettings) -> SoundSettings) {
-        draft.value = change(draft.value ?: current.value)
+        val before = draft.value ?: Draft(soundKey(settings.current.sound, target.deviceKey.value), current.value)
+        draft.value = Draft(before.key, change(before.sound))
         pending = change
         if (writer?.isActive != true) {
             writer = scope.launch {
                 while (true) {
                     val edit = pending ?: break
                     pending = null
-                    update(edit)
+                    draft.value?.let { updateSet(it.key, edit) }
                     delay(SAVE_EVERY_MS)
                 }
             }
         }
     }
 
-    // The pointer let go: save the last position now.
+    // The pointer let go: save the last position now, to the set it moved.
     fun settle() {
+        val moving = draft.value
         pending?.let {
             pending = null
-            update(it)
+            if (moving != null) updateSet(moving.key, it)
         }
         writer?.cancel()
         draft.value = null
+    }
+
+    // Changes one saved set, starting from it as saved (or from the shared
+    // set, for an output never set up).
+    private fun updateSet(key: String, change: (SoundSettings) -> SoundSettings) {
+        settings.update { s ->
+            val from = s.sound.profiles[key] ?: s.sound.profiles[SHARED_SOUND] ?: SoundSettings()
+            s.copy(sound = s.sound.copy(profiles = s.sound.profiles + (key to change(from))))
+        }
     }
 
     private fun apply(sound: EngineSound) {

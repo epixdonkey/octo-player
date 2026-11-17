@@ -12,8 +12,15 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+// Built with Java 25 like the rest, but the Android app uses this module, so
+// its classes stay at Java 17.
+tasks.withType<JavaCompile>().configureEach { options.release = 17 }
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile>().configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+}
+
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(25)
 
     android {
         namespace = "app.winters.octo.core"
@@ -50,8 +57,23 @@ kotlin {
             implementation(libs.junit)
             implementation(libs.kotlinx.coroutines.test)
             implementation(libs.mockwebserver)
+            // Certificates made in a test: a renewal with the same key, an
+            // authority of the test's own.
+            implementation(libs.okhttp.tls)
         }
     }
+}
+
+// Rewrites src/commonTest/resources/themes/resolved.txt from the resolver.
+// The test fails on purpose after writing, so a fixture is never written
+// silently.
+tasks.register<Test>("writeThemeFixture") {
+    val desktopTest = tasks.named<Test>("desktopTest")
+    testClassesDirs = desktopTest.get().testClassesDirs
+    classpath = desktopTest.get().classpath
+    filter.includeTestsMatching("app.winters.octo.theme.ResolvedFixtureTest")
+    systemProperty("octo.writeThemeFixture", "1")
+    ignoreFailures = true
 }
 
 // A rehearsal of the desktop update on one PC (scripts/rehearse-update.ps1):
@@ -79,4 +101,11 @@ tasks.named<ProcessResources>("desktopProcessResources") {
             destinationDir.resolve("app/winters/octo/update/trusted-keys.txt").appendText("\n# A throwaway key for a rehearsal on one PC (-PoctoRehearsalKey).\n$rehearsalKey\n")
         }
     }
+}
+
+// The gateway and stream version tests read the fixtures shared with the
+// iPhone app.
+tasks.withType<Test>().configureEach {
+    inputs.dir(rootProject.file("fixtures/gateway"))
+    inputs.file(rootProject.file("fixtures/stream-versions-words.json"))
 }

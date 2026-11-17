@@ -89,13 +89,19 @@ public struct FamilyAbilities: Decodable, Sendable, Equatable {
     public var approveRequests = false
     public var storageLimitGb = 0
     public var instantFromFamily = true
+    /// Where the songs they add land, as the server names it: "Own" (their own library) or
+    /// "Shared" (the shared library). Read as text, so an older server (none) or a newer name
+    /// reads as their own library.
+    public var musicGoesTo = musicGoesToOwn
+
+    public var musicGoesToShared: Bool { musicGoesTo == musicGoesToSharedName }
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case addToLibrary, requestQuality, autoApprove, weeklyRequestLimit, streamCap, awayCap, away, devicesAtOnce
         case downloadFiles, offlineCopies, share, importPlaylists, cleanOnly, familyPlaylistsEdit, manageFamily
-        case approveRequests, storageLimitGb, instantFromFamily
+        case approveRequests, storageLimitGb, instantFromFamily, musicGoesTo
     }
 
     public init(from decoder: Decoder) throws {
@@ -118,8 +124,13 @@ public struct FamilyAbilities: Decodable, Sendable, Equatable {
         approveRequests = c.bool(.approveRequests) ?? false
         storageLimitGb = c.int(.storageLimitGb) ?? 0
         instantFromFamily = c.bool(.instantFromFamily) ?? true
+        musicGoesTo = c.string(.musicGoesTo) ?? musicGoesToOwn
     }
 }
+
+/// The server's names for where a member's songs land.
+public let musicGoesToOwn = "Own"
+public let musicGoesToSharedName = "Shared"
 
 /// The signed-in account as the family sees it.
 public struct FamilyMe: Decodable, Sendable, Equatable {
@@ -171,9 +182,12 @@ public struct FamilyMember: Decodable, Sendable, Equatable, Identifiable {
     public var pendingRequests = 0
     public var storageUsedBytes: Int64 = 0
     public var storageLimitGb = 0
+    /// Where the songs they add land (`FamilyAbilities.musicGoesTo`).
+    public var musicGoesTo = musicGoesToOwn
 
     public var id: String { username }
     public var role: FamilyRole? { familyRole(roleName) }
+    public var musicGoesToShared: Bool { musicGoesTo == musicGoesToSharedName }
 
     public init(username: String = "", displayName: String = "", roleName: String = FamilyRole.member.rawValue) {
         self.username = username
@@ -182,7 +196,7 @@ public struct FamilyMember: Decodable, Sendable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case username, displayName, role, suspended, devices, playingNow, pendingRequests, storageUsedBytes, storageLimitGb
+        case username, displayName, role, suspended, devices, playingNow, pendingRequests, storageUsedBytes, storageLimitGb, musicGoesTo
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +210,7 @@ public struct FamilyMember: Decodable, Sendable, Equatable, Identifiable {
         pendingRequests = c.int(.pendingRequests) ?? 0
         storageUsedBytes = c.long(.storageUsedBytes) ?? 0
         storageLimitGb = c.int(.storageLimitGb) ?? 0
+        musicGoesTo = c.string(.musicGoesTo) ?? musicGoesToOwn
     }
 }
 
@@ -604,43 +619,42 @@ extension SubsonicClient {
     }
 }
 
-/// The new device's open calls: no sign-in goes with them.
+/// The new device's open calls: no sign-in goes with them. They go through a client made for
+/// the link's address (its headers, certificates and sign-in page fields), whose credentials
+/// are never used.
 public enum FamilyOpenCalls {
     /// Redeems the token from the QR code, naming this device, and answers the id to wait on.
-    public static func redeem(server: URL, session: URLSession, token: String, deviceName: String, platform: FamilyPlatform,
-                              headers: [String: String] = [:]) async throws -> String {
+    public static func redeem(client: SubsonicClient, token: String, deviceName: String, platform: FamilyPlatform) async throws -> String {
         let redeemed: FamilySignInRedeemed = try await openCall(
-            server, session, "redeemFamilySignIn",
+            client, "redeemFamilySignIn",
             [("token", token), ("deviceName", deviceName.trimmingCharacters(in: .whitespacesAndNewlines)), ("platform", platform.wire)],
-            key: "familySignInRedeemed", headers: headers)
+            key: "familySignInRedeemed")
         return redeemed.id
     }
 
     /// How the redeemed hand-over stands, with the sealed sign-in once allowed.
-    public static func status(server: URL, session: URLSession, id: String, headers: [String: String] = [:]) async throws -> FamilySignInStatus {
-        try await openCall(server, session, "getFamilySignInRedeem", [("id", id)], key: "familySignInRedeem", headers: headers)
+    public static func status(client: SubsonicClient, id: String) async throws -> FamilySignInStatus {
+        try await openCall(client, "getFamilySignInRedeem", [("id", id)], key: "familySignInRedeem")
     }
 
-    static func openCall<T: Decodable>(_ server: URL, _ session: URLSession, _ endpoint: String, _ params: [(String, String)],
-                                       key: String, headers: [String: String]) async throws -> T {
-        var parts = URLComponents(url: server.appendingPathComponent("rest").appendingPathComponent(endpoint), resolvingAgainstBaseURL: false)!
+    static func openCall<T: Decodable>(_ client: SubsonicClient, _ endpoint: String, _ params: [(String, String)],
+                                       key: String) async throws -> T {
+        var parts = URLComponents(url: client.baseURL.appendingPathComponent("rest").appendingPathComponent(endpoint),
+                                  resolvingAgainstBaseURL: false)!
         let query = [("v", SubsonicClient.apiVersion), ("c", SubsonicClient.clientName), ("f", "json")] + params
         parts.percentEncodedQueryItems = query.map {
             URLQueryItem(name: $0.0, value: $0.1.addingPercentEncoding(withAllowedCharacters: SubsonicClient.queryValue))
         }
-        var request = URLRequest(url: parts.url!, timeoutInterval: 20)
-        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+        let request = URLRequest(url: parts.url!, timeoutInterval: 20)
         let data: Data
-        let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, _) = try await ServerExchange.data(for: request, client: client, endpoint: endpoint)
+        } catch let error as SubsonicError {
+            throw error
         } catch is CancellationError {
             throw CancellationError()
         } catch {
             throw SubsonicError(error)
-        }
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw SubsonicError.notSubsonic("HTTP \(http.statusCode) from \(endpoint)", status: http.statusCode)
         }
         return try SubsonicClient.read(data, key: key, fallback: nil)
     }

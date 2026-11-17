@@ -29,6 +29,10 @@ final class OfflineDownloads {
         let configuration = URLSessionConfiguration.background(withIdentifier: "app.winters.octo.downloads").namingOcto(Session.appVersion)
         configuration.sessionSendsLaunchEvents = true
         configuration.isDiscretionary = false
+        // The system carries these transfers on by itself, so they keep no cookies: each request
+        // takes the server's headers alone.
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
         return URLSession(configuration: configuration, delegate: bridge, delegateQueue: bridge.queue)
     }()
     /// The download running now: its key, its transfer, and where its file goes.
@@ -49,7 +53,14 @@ final class OfflineDownloads {
         var format: String?
         /// The server's size for the song's file as the download started.
         var fileSize: Int64?
+        /// The type smaller copies were asked as (MP3 for a transfer from before formats).
+        var asked: DownloadFormat
+        /// About how many bytes it comes to, for its progress when the server sends no length.
+        var expected: Int64
     }
+
+    /// Whether the bundled Opus tone has been tried since the app started.
+    @ObservationIgnored private var opusProbeTried = false
 
     init(session: Session, library: Library, settings: AppSettings = .shared, connectivity: Connectivity, sync: ServerSync,
          announce: @escaping @MainActor (String) -> Void) {
@@ -88,6 +99,13 @@ final class OfflineDownloads {
         for file in (try? FileManager.default.contentsOfDirectory(at: Self.asideFolder, includingPropertiesForKeys: nil)) ?? [] {
             try? FileManager.default.removeItem(at: file)
         }
+        // Pieces of downloads the app closed on before they finished. This runs before the transfer
+        // session exists, so no transfer the system hands back has a piece here yet.
+        let entries = ((try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: [.isRegularFileKey])) ?? [])
+            .map { (name: $0.lastPathComponent, isFile: (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true) }
+        for name in leftoverDownloadParts(entries) {
+            try? FileManager.default.removeItem(at: Self.folder.appendingPathComponent(name))
+        }
         watches.append(Watch({ [weak library] in library?.downloadsVersion ?? 0 }) { [weak self] _ in
             Task { await self?.reload() }
         })
@@ -96,6 +114,11 @@ final class OfflineDownloads {
                 await self?.reload()
                 await self?.pump()
             }
+        })
+        // Every new connection (an edit, a sign-out, another server) comes with a new cookie
+        // store, told apart by its own id.
+        watches.append(Watch({ [weak self] in self?.session.client.map { $0.cookies.id } }) { [weak self] _ in
+            Task { await self?.connectionReplaced() }
         })
         // Rules follow likes, kept playlists and their songs, once they settle.
         watches.append(Watch({ [weak self] in
@@ -246,16 +269,18 @@ final class OfflineDownloads {
     func setPlaylistKept(_ playlistId: String, _ kept: Bool) { settings.setPlaylistKept(playlistId, kept: kept) }
 
     /// The finished downloads of these library songs whose files are there. One whose file has
-    /// gone waits to download again.
+    /// gone waits to download again, and so does one whose file is a web page (a sign-in page an
+    /// older version kept as the song), its file deleted.
     func playableCopies(_ trackIds: [String]) async -> [String: KeptDownload] {
         let rows = (try? await library.store.doneDownloads(for: distinct(trackIds))) ?? []
         var present: [String: KeptDownload] = [:]
         var gone = false
         for row in rows {
-            if !row.path.isEmpty, FileManager.default.fileExists(atPath: row.path) {
+            if !row.path.isEmpty, FileManager.default.fileExists(atPath: row.path), !Self.storedPage(row.path) {
                 present[row.trackId] = row
             } else {
                 gone = true
+                if !row.path.isEmpty { try? FileManager.default.removeItem(atPath: row.path) }
                 try? await library.store.setDownloadState(row.sourceId, row.serverId, state: .queued, progress: 0)
             }
         }
@@ -366,6 +391,17 @@ final class OfflineDownloads {
         Task { await pump() }
     }
 
+    /// A new connection to the server: the transfer running went out with the old one's headers,
+    /// so it stops and waits again, to go with the new one's.
+    private func connectionReplaced() async {
+        if let running {
+            running.task.cancel()
+            self.running = nil
+            try? await library.store.setDownloadState(running.row.sourceId, running.row.serverId, state: .queued, progress: 0)
+        }
+        await pump()
+    }
+
     /// Starts the oldest waiting download of the server in use, when one may run now. One look at
     /// a time.
     /// While a failed download waits to be tried again, the queue waits with it.
@@ -387,41 +423,89 @@ final class OfflineDownloads {
             Task { await self.pump() }
             return
         }
-        let maxKbps = downloadMaxKbps(mimeType: copy.mimeType, bitrate: downloadBitrate(copy), quality: settings.offline.downloadQuality)
-        let format = downloadFormat(serverMimeType: copy.mimeType, maxKbps: maxKbps)
-        let fileName = downloadFileName(artist: copy.artist, title: copy.title, sourceId: next.sourceId, serverId: next.serverId, format: format)
+        let key = downloadKey(next.sourceId, next.serverId)
+        let picked = settings.offline.downloadFormat
+        // Whether this phone's system plays the Opus files it writes is found once per system
+        // version, before the first Opus download: it decides whether an Opus download is put into
+        // a CAF or kept as Ogg Opus for Octo's own decoder. Opus is asked as Opus either way.
+        if picked == .opus, settings.opusAbility == nil, !opusProbeTried {
+            opusProbeTried = true
+            if let answer = await OpusProbe.run() { settings.setOpusAbility(answer) }
+        }
+        let asked = picked
+        let quality = settings.offline.downloadQuality
+        let maxKbps: Int?
+        switch downloadAsk(mimeType: copy.mimeType, bitrate: downloadBitrate(copy), quality: quality) {
+        case .asItIs:
+            maxKbps = nil
+        case .smaller(let kbps):
+            maxKbps = kbps
+        case .lookFirst:
+            do {
+                let head = try await Self.firstBytes(of: next.serverId, client: server.client)
+                maxKbps = oggDecision(head: head) == .asItIs ? nil : (quality.kbps ?? 320)
+            } catch {
+                guard running == nil else { return }
+                Task { await self.afterFailure(next, refused: false, error: error) }
+                return
+            }
+        }
+        let request = StreamRequest(maxKbps, format: asked, estimate: false)
+        let format = downloadFormat(serverMimeType: copy.mimeType, maxKbps: maxKbps, asked: asked)
+        let fileName = downloadFileName(artist: copy.artist, title: copy.title, sourceId: next.sourceId, serverId: next.serverId,
+                                        format: format, madeSmaller: maxKbps != nil)
         // A song saved whole as it played is copied from the phone rather than fetched again, as
-        // long as it was saved from the file the server has now.
+        // long as it was saved from the file the server has now. It arrives like any download.
         let fileSize = copy.sizeBytes.flatMap { $0 > 0 ? $0 : nil }
         let ref = StreamRef(sourceId: next.sourceId, serverId: next.serverId, mimeType: copy.mimeType, bitrate: nil, size: fileSize)
-        let savedKey = await StreamCache.shared.savedKey(next.sourceId, ref, StreamRequest(maxKbps))
+        let savedKey = await StreamCache.shared.savedKey(next.sourceId, ref, request)
         if let saved = await StreamCache.shared.savedFile(savedKey) {
             let part = Self.folder.appendingPathComponent(downloadPartName(fileName))
-            let target = Self.folder.appendingPathComponent(fileName)
             try? FileManager.default.removeItem(at: part)
-            try? FileManager.default.removeItem(at: target)
-            if (try? FileManager.default.copyItem(at: saved.url, to: part)) != nil,
-               (try? FileManager.default.moveItem(at: part, to: target)) != nil {
-                let size = (try? FileManager.default.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value ?? 0
-                try? await store.finishDownload(next.sourceId, next.serverId, path: target.path, size: size, format: format,
-                                                fileSize: fileSize)
-                Self.dropOldFile(next, now: target)
-                Task { await self.pump() }
-                return
+            if (try? FileManager.default.copyItem(at: saved.url, to: part)) != nil {
+                let job = Arrived(row: next, part: part, startName: fileName, answeredType: saved.mimeType, listed: copy.mimeType,
+                                  askedSmaller: maxKbps != nil, asked: asked, fileSize: fileSize)
+                switch await arrive(job) {
+                case .finished, .removed:
+                    Task { await self.pump() }
+                    return
+                case .failed:
+                    Task { await self.afterFailure(next, refused: false, error: nil) }
+                    return
+                }
             }
             try? FileManager.default.removeItem(at: part)
         }
         var params = [("id", next.serverId)]
-        params += StreamRequest(maxKbps).params
-        var request = URLRequest(url: server.client.url("stream", params))
-        for (name, value) in server.client.headers { request.setValue(value, forHTTPHeaderField: name) }
+        params += request.params
+        let client = server.client
         // The server is told this is an offline copy, so an Octo server does not count it as a play.
-        request.setValue(octoPurposeOffline, forHTTPHeaderField: octoPurposeHeader)
-        request.allowsCellularAccess = !settings.offline.wifiOnly
-        let task = transfer.downloadTask(with: request)
-        task.taskDescription = [downloadKey(next.sourceId, next.serverId), fileName, format ?? "", fileSize.map(String.init) ?? ""]
+        let purpose = [octoPurposeHeader: octoPurposeOffline]
+        var asked_ = URLRequest(url: client.url("stream", params))
+        for (name, value) in purpose { asked_.setValue(value, forHTTPHeaderField: name) }
+        asked_.allowsCellularAccess = !settings.offline.wifiOnly
+        // The system follows a background transfer's redirects by itself, with none of the
+        // server's rules, so they are followed here first and the transfer asks where they end.
+        let landed: URL
+        do {
+            landed = try await ServerExchange.finalAddress(of: asked_, client: client)
+        } catch {
+            guard running == nil else { return }
+            Task { await self.afterFailure(next, refused: false, error: error) }
+            return
+        }
+        // Another connection came in meanwhile: the song waits for the pump that follows it.
+        guard running == nil, session.client?.cookies.id == client.cookies.id else {
+            Task { await self.pump() }
+            return
+        }
+        var transferRequest = backgroundDownloadRequest(landed, client: client, serverOnly: purpose)
+        transferRequest.allowsCellularAccess = !settings.offline.wifiOnly
+        let task = transfer.downloadTask(with: transferRequest)
+        task.taskDescription = [key, fileName, format ?? "", fileSize.map(String.init) ?? ""]
             .joined(separator: "\n")
-        running = Running(row: next, task: task, fileName: fileName, format: format, fileSize: fileSize)
+        running = Running(row: next, task: task, fileName: fileName, format: format, fileSize: fileSize, asked: asked,
+                          expected: expectedDownloadBytes(durationMs: copy.durationMs, maxKbps: maxKbps))
         lastProgressMs = 0
         try? await store.setDownloadState(next.sourceId, next.serverId, state: .downloading, progress: 0)
         task.resume()
@@ -431,6 +515,57 @@ final class OfflineDownloads {
     nonisolated private static func dropOldFile(_ row: KeptDownload, now target: URL) {
         guard !row.path.isEmpty, row.path != target.path else { return }
         try? FileManager.default.removeItem(atPath: row.path)
+    }
+
+    /// A listed Ogg file's first 64 bytes, marked as an offline copy so an Octo server counts no play.
+    private static func firstBytes(of serverId: String, client: SubsonicClient) async throws -> [UInt8] {
+        var asked = URLRequest(url: client.url("stream", [("id", serverId), ("format", "raw")]))
+        asked.setValue("bytes=0-63", forHTTPHeaderField: "Range")
+        asked.setValue(octoPurposeOffline, forHTTPHeaderField: octoPurposeHeader)
+        let (data, _) = try await ServerExchange.media(for: asked, client: client, endpoint: "stream")
+        return [UInt8](data.prefix(64))
+    }
+
+    /// A download whose bytes are on the phone, as `part`.
+    private struct Arrived {
+        var row: KeptDownload
+        var part: URL
+        var startName: String
+        var answeredType: String?
+        var listed: String?
+        var askedSmaller: Bool
+        var asked: DownloadFormat
+        var fileSize: Int64?
+    }
+
+    /// Turns an arrived part into a finished download through OctoKit's `finishArrival` (named and
+    /// labeled by its bytes, put into a CAF or an M4A off the main actor, the row looked at again
+    /// before the rename), then writes the finished row. `ArriveOutcome` is OctoKit's.
+    private func arrive(_ job: Arrived) async -> ArriveOutcome {
+        let store = library.store
+        let row = job.row
+        let outcome = await finishArrival(
+            ArrivalJob(part: job.part, folder: Self.folder, startName: job.startName, answeredType: job.answeredType,
+                       listed: job.listed, askedSmaller: job.askedSmaller, asked: job.asked,
+                       opusInCaf: settings.opusAbility == .yes),
+            stillWanted: { (try? await store.download(row.sourceId, row.serverId)) != nil },
+            readsAsOgg: { url in
+                OggOpus.read([UInt8]((try? Data(contentsOf: url, options: .mappedIfSafe)) ?? Data())).flatMap(OggOpusPlayer.init) != nil
+            },
+            rewrap:{ kind, from, to in await Rewrap.inBackground(kind, from: from, to: to) })
+        if case .finished(let target, let label) = outcome {
+            let size = (try? FileManager.default.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value ?? 0
+            try? await store.finishDownload(row.sourceId, row.serverId, path: target.path, size: size, format: label, fileSize: job.fileSize)
+            Self.dropOldFile(row, now: target)
+        }
+        return outcome
+    }
+
+    /// Whether a kept file starts like a web page.
+    nonisolated private static func storedPage(_ path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        return looksLikeHtmlFile((try? handle.read(upToCount: 64)) ?? Data())
     }
 
     /// A transfer still running from before the app last closed carries on; downloads marked as
@@ -449,8 +584,10 @@ final class OfflineDownloads {
                 task.cancel()
                 continue
             }
-            running = Running(row: row, task: task, fileName: parts[1], format: parts[2].isEmpty ? nil : parts[2],
-                              fileSize: parts.count == 4 ? Int64(parts[3]) : nil)
+            let format = parts[2].isEmpty ? nil : parts[2]
+            running = Running(row: row, task: task, fileName: parts[1], format: format,
+                              fileSize: parts.count == 4 ? Int64(parts[3]) : nil,
+                              asked: DownloadFormat.allCases.first { $0.mimeType == format } ?? .mp3, expected: 0)
             live.insert(parts[0])
         }
         for row in (try? await store.allDownloads()) ?? [] where row.state == .downloading && !live.contains(downloadKey(row.sourceId, row.serverId)) {
@@ -463,14 +600,15 @@ final class OfflineDownloads {
     fileprivate func progressed(_ task: URLSessionTask, written: Int64, expected: Int64) {
         guard let running, running.task === task else { return }
         let now = epochNowMs()
-        guard downloadProgressDue(nowMs: now, lastMs: lastProgressMs), let progress = downloadProgress(written: written, length: expected) else {
+        let length = expected > 0 ? expected : running.expected
+        guard downloadProgressDue(nowMs: now, lastMs: lastProgressMs), let progress = downloadProgress(written: written, length: length) else {
             return
         }
         lastProgressMs = now
         Task { try? await library.store.setDownloadState(running.row.sourceId, running.row.serverId, state: .downloading, progress: progress) }
     }
 
-    fileprivate func finished(_ task: URLSessionTask, part: URL?, refused: Bool, error: Error?) {
+    fileprivate func finished(_ task: URLSessionTask, part: URL?, answeredType: String?, refused: Bool, error: Error?) {
         guard let running, running.task === task else {
             if let part { try? FileManager.default.removeItem(at: part) }
             return
@@ -480,47 +618,57 @@ final class OfflineDownloads {
         let key = downloadKey(row.sourceId, row.serverId)
         Task {
             let store = library.store
-            if let part, error == nil, !refused {
-                // Removed while it ran: the file goes.
-                guard (try? await store.download(row.sourceId, row.serverId)) != nil else {
-                    try? FileManager.default.removeItem(at: part)
-                    await pump()
-                    return
-                }
-                let target = Self.folder.appendingPathComponent(running.fileName)
-                try? FileManager.default.removeItem(at: target)
-                if (try? FileManager.default.moveItem(at: part, to: target)) != nil {
-                    let size = (try? FileManager.default.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?.int64Value ?? 0
-                    try? await store.finishDownload(row.sourceId, row.serverId, path: target.path, size: size, format: running.format,
-                                                    fileSize: running.fileSize)
-                    Self.dropOldFile(row, now: target)
+            // A web page where the song was asked for is a sign-in page in front of the server:
+            // never kept, and counted as the server saying no.
+            let turnedAway = refused || part.map { Self.storedPage($0.path) } == true
+            if let part, error == nil, !turnedAway {
+                let listed = (try? await store.serverCopy(row.sourceId, row.serverId))?.mimeType
+                let job = Arrived(row: row, part: part, startName: running.fileName, answeredType: answeredType, listed: listed,
+                                  askedSmaller: isMadeSmallerName(running.fileName), asked: running.asked, fileSize: running.fileSize)
+                switch await arrive(job) {
+                case .finished:
                     tries[key] = nil
                     await pump()
                     return
+                case .removed:
+                    await pump()
+                    return
+                case .failed:
+                    break
                 }
+            } else if let part {
+                try? FileManager.default.removeItem(at: part)
             }
-            if let part { try? FileManager.default.removeItem(at: part) }
-            if let url = error as? URLError, url.code == .cancelled { return }
-            let tried = (tries[key] ?? 0) + 1
-            tries[key] = tried
-            // Only the phone being offline (or off the Wi-Fi it waits for) counts as no connection;
-            // a connection that broke off while online is tried again like any other error.
-            let noConnection = !connectivity.online || (error as? URLError)?.code == .notConnectedToInternet
-                || downloadLeftWifi(wifiOnly: settings.offline.wifiOnly, onWifi: connectivity.onWifi)
-            switch downloadAfterFailure(noConnection: noConnection, serverRefused: refused, tried: tried) {
-            case .waitForConnection:
-                tries[key] = nil
-                try? await store.setDownloadState(row.sourceId, row.serverId, state: .queued, progress: 0)
-            case .fail:
-                try? await store.setDownloadState(row.sourceId, row.serverId, state: .failed, progress: 0)
-            case .retry(let afterMs):
-                try? await store.setDownloadState(row.sourceId, row.serverId, state: .queued, progress: 0)
-                holdUntil = Date().addingTimeInterval(Double(afterMs) / 1000)
-                try? await Task.sleep(for: .milliseconds(afterMs))
-                holdUntil = nil
-            }
-            await pump()
+            await afterFailure(row, refused: turnedAway, error: error)
         }
+    }
+
+    /// A download that did not finish (its transfer, or the redirects followed before it): tried
+    /// again, waiting for a connection, or failed, by `downloadAfterFailure`. A canceled one is
+    /// left as it is.
+    private func afterFailure(_ row: KeptDownload, refused: Bool, error: Error?) async {
+        if let url = error as? URLError, url.code == .cancelled { return }
+        let store = library.store
+        let key = downloadKey(row.sourceId, row.serverId)
+        let tried = (tries[key] ?? 0) + 1
+        tries[key] = tried
+        // Only the phone being offline (or off the Wi-Fi it waits for) counts as no connection;
+        // a connection that broke off while online is tried again like any other error.
+        let noConnection = !connectivity.online || (error as? URLError)?.code == .notConnectedToInternet
+            || downloadLeftWifi(wifiOnly: settings.offline.wifiOnly, onWifi: connectivity.onWifi)
+        switch downloadAfterFailure(noConnection: noConnection, serverRefused: refused, tried: tried) {
+        case .waitForConnection:
+            tries[key] = nil
+            try? await store.setDownloadState(row.sourceId, row.serverId, state: .queued, progress: 0)
+        case .fail:
+            try? await store.setDownloadState(row.sourceId, row.serverId, state: .failed, progress: 0)
+        case .retry(let afterMs):
+            try? await store.setDownloadState(row.sourceId, row.serverId, state: .queued, progress: 0)
+            holdUntil = Date().addingTimeInterval(Double(afterMs) / 1000)
+            try? await Task.sleep(for: .milliseconds(afterMs))
+            holdUntil = nil
+        }
+        await pump()
     }
 }
 
@@ -540,8 +688,10 @@ final class TransferBridge: NSObject, URLSessionDownloadDelegate, @unchecked Sen
         return queue
     }()
     weak var owner: OfflineDownloads?
-    /// Finished files moved aside, and refusals, by transfer, until the transfer completes.
+    /// Finished files moved aside, their answers' types, and refusals, by transfer, until the transfer
+    /// completes.
     private var parts: [Int: URL] = [:]
+    private var types: [Int: String] = [:]
     private var refused = Set<Int>()
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
@@ -552,7 +702,10 @@ final class TransferBridge: NSObject, URLSessionDownloadDelegate, @unchecked Sen
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        if let http = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+        // An error, or a web page where a song was asked for (a sign-in page in front of the
+        // server), is the server saying no: nothing is kept.
+        if let http = downloadTask.response as? HTTPURLResponse,
+           !(200..<300).contains(http.statusCode) || isHtml(http.value(forHTTPHeaderField: "Content-Type")) {
             refused.insert(downloadTask.taskIdentifier)
             return
         }
@@ -560,6 +713,9 @@ final class TransferBridge: NSObject, URLSessionDownloadDelegate, @unchecked Sen
         let part = OfflineDownloads.folder.appendingPathComponent(downloadPartName(name))
         try? FileManager.default.removeItem(at: part)
         if (try? FileManager.default.moveItem(at: location, to: part)) != nil { parts[downloadTask.taskIdentifier] = part }
+        if let type = (downloadTask.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") {
+            types[downloadTask.taskIdentifier] = type
+        }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -570,10 +726,11 @@ final class TransferBridge: NSObject, URLSessionDownloadDelegate, @unchecked Sen
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         ServerTrust.shared.noteEnd(of: task.originalRequest, error)
         let part = parts.removeValue(forKey: task.taskIdentifier)
+        let type = types.removeValue(forKey: task.taskIdentifier)
         let refusedNow = refused.remove(task.taskIdentifier) != nil
         Task { @MainActor [weak owner] in
             if let owner {
-                owner.finished(task, part: part, refused: refusedNow, error: error)
+                owner.finished(task, part: part, answeredType: type, refused: refusedNow, error: error)
             } else if let part {
                 try? FileManager.default.removeItem(at: part)
             }

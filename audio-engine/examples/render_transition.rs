@@ -252,6 +252,7 @@ fn plan_pair(a: &str, b: &str, a_len: f64, b_len: f64, opts: &Options) -> Transi
     };
     let settings = PlanSettings {
         max_overlap_ms: opts.crossfade_ms as i64,
+        longest_intro_ms: automix::AUTOMIX_LONGEST_INTRO_MS,
         smart: true,
         filter_sweeps: opts.sweeps,
         beat_match: opts.match_tempo,
@@ -317,6 +318,10 @@ fn render_pair(a: &str, b: &str, out: &Path, opts: &Options) -> Result<Outcome, 
     let overlap = plan.overlap_secs();
     let frames = (overlap * RATE as f64) as u64;
     let shape = FadeShape {
+        kind: plan.kind,
+        hold_share: plan.hold_share,
+        rise_share: plan.rise_share,
+        intro_level: plan.intro_level,
         k: plan.k,
         curve: plan.curve,
         filter_strength: plan.filter_strength,
@@ -324,6 +329,9 @@ fn render_pair(a: &str, b: &str, out: &Path, opts: &Options) -> Result<Outcome, 
         rate: plan.beat_match_rate,
         silence_gate_db: (plan.k != 0.0).then_some(automix::SILENCE_FLOOR_DB as f32),
         headroom_db: plan.headroom_db as f32,
+        both_heard_ms: (plan.both_heard_start_ms as f64, plan.both_heard_end_ms as f64),
+        lock_ms: plan.lock_ms,
+        drift_gap: plan.drift_gap,
     };
     let wanted = ((plan.start_secs() - from + overlap + AROUND_SECS) * RATE as f64) as usize;
     let (samples, markers) = render(a, b, from, plan.start_secs(), plan.entry_secs(), frames, shape, wanted)?;

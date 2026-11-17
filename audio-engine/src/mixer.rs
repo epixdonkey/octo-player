@@ -9,9 +9,10 @@
 use std::collections::VecDeque;
 
 use crate::automix::{
-    BEAT_MATCH_SETTLE_MS, Biquad, FadeCurve, LiveAnalysis, LiveAnalyzer, RATE_RANGE, beat_match_rate_at,
-    blend_gains, incoming_high_pass_hz, outgoing_high_pass_hz, outgoing_low_pass_hz,
-    stepped_outgoing_low_pass_hz,
+    BEAT_MATCH_SETTLE_MS, Biquad, FadeCurve, LiveAnalysis, LiveAnalyzer, RATE_RANGE, SILENCE_BELOW_BODY_DB,
+    SILENCE_FLOOR_DB, TransitionKind, TransitionPlan, beat_match_rate_at, drop_cut_at_ms,
+    incoming_high_pass_hz, outgoing_high_pass_hz, outgoing_low_pass_hz, stepped_outgoing_low_pass_hz,
+    transition_gains,
 };
 use crate::deck::Deck;
 use crate::error::Failure;
@@ -48,6 +49,13 @@ const ENGAGE_SECS: f64 = 0.01;
 
 /// How long a blend ended on demand takes to finish, in seconds.
 const FINISH_SECS: f64 = 0.01;
+
+/// How long a blend cut short takes to let the outgoing song go, in seconds.
+const CUT_SECS: f64 = 0.02;
+
+/// How long the incoming song takes to come up to its own level when the
+/// outgoing one ends before the blend does, in seconds.
+const LIFT_SECS: f64 = 0.25;
 
 /// How far into and out of a blend the headroom takes to come and go, as
 /// a share of the blend.
@@ -98,8 +106,15 @@ pub struct LowPassSteps {
 }
 
 /// How a crossfade sounds. The default is the plain equal-power crossfade.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FadeShape {
+    /// The kind of blend. An intro's gains follow `hold_share`,
+    /// `rise_share` and `intro_level` (the incoming song's gain through the
+    /// hold) in place of `k` and `curve` (see `automix::transition_gains`).
+    pub kind: TransitionKind,
+    pub hold_share: f64,
+    pub rise_share: f64,
+    pub intro_level: f64,
     /// Gain curve weight: 0 is equal power (see `automix::gains`).
     pub k: f64,
     /// The fixed crossfade's shape; equal power follows `k` (see
@@ -112,11 +127,73 @@ pub struct FadeShape {
     /// The incoming song's rate through the blend, eased back to 1 after.
     pub rate: Option<f64>,
     /// When the outgoing song stays below this level (dBFS) for 0.3 s
-    /// during the blend, the blend finishes early.
+    /// during the blend, the blend finishes early. Through an intro's hold
+    /// the outgoing song plays at its own level, so a break in its music
+    /// there is the song's own: the gate listens only from `hold_share` on.
     pub silence_gate_db: Option<f32>,
     /// Lowers both songs by this many dB through the blend, coming and going
     /// over its first and last tenth, so the sum keeps clear of clipping.
     pub headroom_db: f32,
+    /// In milliseconds of the outgoing song from the blend's start: where
+    /// both songs are clearly heard together, from and up to, and where
+    /// their beats meet; and how fast the beats part from there (the share
+    /// the tempos are apart, 0 when they cannot drift). A speed lowered too
+    /// far for that cuts the blend where the beats would be heard too far
+    /// apart (see [`Mixer::follow_speed`]).
+    pub both_heard_ms: (f64, f64),
+    pub lock_ms: f64,
+    pub drift_gap: f64,
+}
+
+impl Default for FadeShape {
+    fn default() -> FadeShape {
+        FadeShape {
+            kind: TransitionKind::default(),
+            hold_share: 0.0,
+            rise_share: 0.0,
+            intro_level: 1.0,
+            k: 0.0,
+            curve: FadeCurve::default(),
+            filter_strength: 0.0,
+            steps: None,
+            rate: None,
+            silence_gate_db: None,
+            headroom_db: 0.0,
+            both_heard_ms: (0.0, 0.0),
+            lock_ms: 0.0,
+            drift_gap: 0.0,
+        }
+    }
+}
+
+impl FadeShape {
+    /// How the mixer runs `plan`, whose outgoing song's body level is
+    /// `body_db` when it is known. The silence gate sits that far under the
+    /// body, and is set for every planned curve but plain equal power, and
+    /// for an intro, whose shape has no curve weight. A planned rate is kept
+    /// as it is: the planner sets one only when the incoming song outlasts
+    /// the ease back to its own rate.
+    pub fn for_plan(plan: &TransitionPlan, body_db: Option<f64>) -> FadeShape {
+        let gate =
+            body_db.map_or(SILENCE_FLOOR_DB, |body| SILENCE_FLOOR_DB.max(body - SILENCE_BELOW_BODY_DB));
+        let gated = plan.k != 0.0 || plan.kind == TransitionKind::Intro;
+        FadeShape {
+            kind: plan.kind,
+            hold_share: plan.hold_share,
+            rise_share: plan.rise_share,
+            intro_level: plan.intro_level,
+            k: plan.k,
+            curve: plan.curve,
+            filter_strength: plan.filter_strength,
+            steps: plan.low_pass_glide().map(|glide| LowPassSteps { beats: plan.beat_progress(), glide }),
+            rate: plan.beat_match_rate,
+            silence_gate_db: gated.then_some(gate as f32),
+            headroom_db: plan.headroom_db as f32,
+            both_heard_ms: (plan.both_heard_start_ms as f64, plan.both_heard_end_ms as f64),
+            lock_ms: plan.lock_ms,
+            drift_gap: plan.drift_gap,
+        }
+    }
 }
 
 // The song and moment at a mix frame, before speed changes. The song moves
@@ -145,6 +222,10 @@ struct Fade {
     frames: u64,
     done: u64,
     clock: FadeClock,
+    kind: TransitionKind,
+    hold_share: f64,
+    rise_share: f64,
+    intro_level: f64,
     k: f64,
     curve: FadeCurve,
     // The blend's length in milliseconds of output, for curves with edges
@@ -155,6 +236,60 @@ struct Fade {
     gate: Option<f32>,
     quiet: u64,
     headroom_db: f32,
+    // Whether the blend began where it was planned, not early because the
+    // outgoing song's sound ran out before then; one that began early hands
+    // over at once.
+    on_time: bool,
+    // From the shape: where both songs are heard together, where their
+    // beats meet and how fast they part.
+    both_heard_ms: (f64, f64),
+    lock_ms: f64,
+    drift_gap: f64,
+    // The frame of the blend a lowered speed cuts it at, and the cut once it
+    // has begun.
+    cut_at: Option<u64>,
+    cut: Option<Cut>,
+}
+
+// A blend ended by a cut: from frame `at` of the blend the outgoing song
+// goes from `out_from` to nothing over `len` frames while the incoming one
+// stays at `in_from`; then the blend ends and the incoming song comes up to
+// its own level as when the outgoing one ends inside the blend.
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    at: u64,
+    len: u64,
+    out_from: f32,
+    in_from: f32,
+}
+
+impl Cut {
+    fn end(&self) -> u64 {
+        self.at + self.len
+    }
+}
+
+impl Fade {
+    // Both songs' gains at frame `done` of the blend, with its headroom.
+    fn gains_at(&self, done: u64) -> (f32, f32) {
+        let p = self.clock.progress(done);
+        let (mut gout, mut gin) = transition_gains(
+            self.kind,
+            self.curve,
+            self.k,
+            self.hold_share,
+            self.rise_share,
+            self.intro_level,
+            p,
+            self.overlap_ms,
+        );
+        if self.headroom_db > 0.0 {
+            let h = headroom(self.headroom_db, p);
+            gout *= h;
+            gin *= h;
+        }
+        (gout as f32, gin as f32)
+    }
 }
 
 // The song fading out: its lane, through the rate stage it still had when
@@ -426,11 +561,54 @@ struct Release {
     len: usize,
 }
 
+// The incoming song coming up in a straight line from the gain `from` it had
+// when the outgoing song ended inside the blend, to its own level over `len`
+// frames.
+struct Lift {
+    from: f64,
+    done: usize,
+    len: usize,
+}
+
+impl Lift {
+    // The gain `at` frames from here.
+    fn gain(&self, at: usize) -> f32 {
+        let u = ((self.done + at + 1) as f64 / self.len as f64).min(1.0);
+        (self.from + (1.0 - self.from) * u) as f32
+    }
+}
+
+// From output frame `at` of a block of `frames`, where frame `i` is made
+// from the mix frames from `from + i * step` up to `from + (i + 1) * step`:
+// whether any of those fall inside one of the blend `windows` (mix frames,
+// from and up to, in order), and the frame where that changes.
+fn blend_run(
+    windows: &VecDeque<(u64, u64)>,
+    from: f64,
+    step: f64,
+    at: usize,
+    frames: usize,
+) -> (bool, usize) {
+    let lo = from + at as f64 * step;
+    for &(a, b) in windows {
+        if (b as f64) <= lo {
+            continue;
+        }
+        // The first frame reaching past the window's start, and the first
+        // starting at or past its end.
+        let first = ((a as f64 - from) / step).floor().max(0.0) as usize;
+        let end = (((b as f64 - from) / step).ceil().max(0.0) as usize).min(frames);
+        return if first <= at { (true, end.max(at + 1)) } else { (false, first.min(frames)) };
+    }
+    (false, frames)
+}
+
 pub struct Mixer {
     rate: u32,
     lane: Option<Lane>,
     fade: Option<Fade>,
     release: Option<Release>,
+    lift: Option<Lift>,
     planned: Option<PlannedFade>,
     rated: Option<Rated>,
     tap: LiveTap,
@@ -454,9 +632,12 @@ pub struct Mixer {
     tail_left: usize,
     failures: Vec<(u64, Failure)>,
     last_marker: Option<Marker>,
-    // Whether two songs sounded together in what was mixed since the last
-    // block went to the shaper.
-    blended: bool,
+    // The mix frames, from and up to, through which two songs sounded
+    // together or the incoming one was still coming up after the outgoing
+    // one ended, kept until the output has passed them.
+    blend_windows: VecDeque<(u64, u64)>,
+    // The mix frames the last output block was made from.
+    block_source: (f64, f64),
 }
 
 impl Mixer {
@@ -471,6 +652,7 @@ impl Mixer {
             lane: None,
             fade: None,
             release: None,
+            lift: None,
             planned: None,
             rated: None,
             tap: LiveTap { key: None, analyzer: LiveAnalyzer::new(), mono: Vec::with_capacity(BLOCK) },
@@ -491,7 +673,8 @@ impl Mixer {
             tail_left: 0,
             failures: Vec::new(),
             last_marker: None,
-            blended: false,
+            blend_windows: VecDeque::new(),
+            block_source: (0.0, 0.0),
         }
     }
 
@@ -532,6 +715,7 @@ impl Mixer {
         self.lane = Some(lane);
         self.fade = None;
         self.release = None;
+        self.lift = None;
         self.planned = None;
         self.rated = None;
         self.next_transition = Some(transition);
@@ -543,6 +727,7 @@ impl Mixer {
         self.lane = None;
         self.fade = None;
         self.release = None;
+        self.lift = None;
         self.planned = None;
         self.rated = None;
         self.pace.clear();
@@ -553,6 +738,7 @@ impl Mixer {
     pub fn seek(&mut self, secs: f64) {
         self.fade = None;
         self.release = None;
+        self.lift = None;
         self.planned = None;
         self.rated = None;
         if let Some(lane) = &mut self.lane {
@@ -632,6 +818,41 @@ impl Mixer {
         }
     }
 
+    /// Follows the listener's speed through the blend under way: where, at
+    /// `speed`, its two songs' beats would first be heard further apart
+    /// than the planner allows while both are still heard together (see
+    /// `automix::drop_cut_at_ms`), the blend is cut ([`Mixer::cut_fade`]),
+    /// never inside a hold, where the outgoing song is at its own level; a
+    /// speed where they never would clears a cut still to come. Returns the
+    /// frame of the blend the cut falls on.
+    pub fn follow_speed(&mut self, speed: f64) -> Option<u64> {
+        let rate = self.rate as f64;
+        let fade = self.fade.as_mut()?;
+        if fade.cut.is_some() {
+            return None;
+        }
+        let along_ms = fade.done as f64 * 1_000.0 / rate;
+        let hold_end_ms = fade.hold_share.clamp(0.0, 1.0) * fade.frames as f64 * 1_000.0 / rate;
+        let at_ms =
+            drop_cut_at_ms(fade.both_heard_ms, hold_end_ms, fade.lock_ms, fade.drift_gap, speed, along_ms);
+        fade.cut_at = at_ms.map(|ms| (ms * rate / 1_000.0).ceil() as u64);
+        fade.cut_at
+    }
+
+    /// Cuts the blend under way: the outgoing song goes from where it is
+    /// to nothing over `CUT_SECS` while the incoming one holds its level,
+    /// then the blend ends and the incoming song comes up to its own level
+    /// over `LIFT_SECS`, the limiter on throughout.
+    pub fn cut_fade(&mut self) {
+        let len = ((CUT_SECS * self.rate as f64) as u64).max(1);
+        if let Some(fade) = &mut self.fade
+            && fade.cut.is_none()
+        {
+            let (out_from, in_from) = fade.gains_at(fade.done);
+            fade.cut = Some(Cut { at: fade.done, len, out_from, in_from });
+        }
+    }
+
     // Drops the blend, keeping its incoming filter for the release.
     fn end_fade(&mut self) {
         if let Some(sweeps) = self.fade.take().and_then(|f| f.sweeps) {
@@ -682,11 +903,29 @@ impl Mixer {
                 }
                 break;
             }
-            self.shaper.set_blending(std::mem::take(&mut self.blended));
-            self.shaper.process(&mut self.block, frames);
+            // Each output frame is shaped as a blend's when the mix frames the
+            // speed stage made it from fall inside a blend's window, so a
+            // block across a window's edge is shaped in two parts.
+            let (from, to) = self.block_source;
+            while self.blend_windows.front().is_some_and(|&(_, b)| (b as f64) <= from) {
+                self.blend_windows.pop_front();
+            }
+            let step = (to - from) / frames as f64;
+            let mut at = 0;
+            while at < frames {
+                let (blending, until) = blend_run(&self.blend_windows, from, step, at, frames);
+                self.shaper.set_blending(blending);
+                self.shaper.process(&mut self.block[at * 2..until * 2], until - at);
+                at = until;
+            }
             out[made * 2..(made + frames) * 2].copy_from_slice(&self.block[..frames * 2]);
             made += frames;
             self.made += frames as u64;
+        }
+        // The mix has ended only once the shaper's held-back tail is out
+        // too; until then more sound is coming.
+        if state == MixState::Ended && self.tail_left > 0 {
+            state = MixState::Playing;
         }
         (made, state)
     }
@@ -697,6 +936,7 @@ impl Mixer {
         let (frames, state) = self.mix(n);
         if frames > 0 {
             self.emit_markers(start as f64, frames, 1.0, markers);
+            self.block_source = (start as f64, (start + frames as u64) as f64);
         }
         (frames, state)
     }
@@ -721,7 +961,9 @@ impl Mixer {
         let start = self.mixed as f64 - pending;
         let frames = self.pace.pull(&mut self.block[..n * 2]);
         if frames > 0 {
-            self.emit_markers(start, frames, self.pace.pace().speed as f64, markers);
+            let step = self.pace.pace().speed as f64;
+            self.emit_markers(start, frames, step, markers);
+            self.block_source = (start, start + frames as f64 * step);
             state = MixState::Playing;
         }
         (frames, state)
@@ -776,10 +1018,26 @@ impl Mixer {
             self.begin_fade();
             n = wanted;
         }
-        self.blended |= self.fade.is_some();
-        // A blend ends on its exact frame, where the filters come off.
+        let blending = self.fade.is_some() || self.lift.is_some();
+        let first = self.mixed;
+        // A cut a lowered speed set begins on its frame.
+        if self.fade.as_ref().is_some_and(|f| f.cut.is_none() && f.cut_at.is_some_and(|at| f.done >= at)) {
+            self.cut_fade();
+        }
+        // A blend ends on its exact frame, where the filters come off, and a
+        // cut begins and ends on its own.
         if let Some(fade) = &self.fade {
             n = n.min(fade.clock.end().saturating_sub(fade.done).max(1) as usize);
+            match (fade.cut, fade.cut_at) {
+                (Some(cut), _) => n = n.min(cut.end().saturating_sub(fade.done).max(1) as usize),
+                (None, Some(at)) if at > fade.done => n = n.min((at - fade.done) as usize),
+                _ => {}
+            }
+        }
+        // A lift ends on its exact frame too, so the blend's window, and the
+        // limiter run for it, end there.
+        if let Some(lift) = &self.lift {
+            n = n.min(lift.len.saturating_sub(lift.done).max(1));
         }
         let Some(lane) = &mut self.lane else {
             return (0, MixState::Ended);
@@ -832,12 +1090,31 @@ impl Mixer {
             self.spans = spans;
         }
         self.follow_song_gain();
+        if blending {
+            match self.blend_windows.back_mut() {
+                Some(window) if window.1 >= first => window.1 = self.mixed,
+                _ => self.blend_windows.push_back((first, self.mixed)),
+            }
+        }
         if let Some(fade) = &mut self.fade {
             let old = fade.outgoing.pull(&mut self.b[..frames * 2], &mut self.spans_b);
             self.b[old * 2..frames * 2].fill(0.0);
-            if let Some(gate) = fade.gate {
-                let power = self.b[..frames * 2].iter().map(|s| s * s).sum::<f32>() / (frames * 2) as f32;
-                fade.quiet = if power < gate { fade.quiet + frames as u64 } else { 0 };
+            // Through a hold (an intro's, or the incoming song's silent
+            // lead-in) the outgoing song is at its own level, so the gate
+            // counts quiet only from the hold's end on.
+            let listen_from = if fade.hold_share > 0.0 {
+                let hold_end = (fade.hold_share.clamp(0.0, 1.0) * fade.frames as f64).ceil() as u64;
+                hold_end.saturating_sub(fade.done).min(frames as u64) as usize
+            } else {
+                0
+            };
+            if let Some(gate) = fade.gate
+                && listen_from < frames
+            {
+                let heard = &self.b[listen_from * 2..frames * 2];
+                let power = heard.iter().map(|s| s * s).sum::<f32>() / heard.len() as f32;
+                let counted = (frames - listen_from) as u64;
+                fade.quiet = if power < gate { fade.quiet + counted } else { 0 };
                 if fade.clock.rush.is_none() && fade.quiet as f64 >= QUIET_SECS * self.rate as f64 {
                     // The outgoing song has gone quiet: finish the blend now.
                     let len =
@@ -849,40 +1126,76 @@ impl Mixer {
                 let clock = fade.clock;
                 sweeps.run(&mut self.b, &mut self.a, frames, fade.done, |d| clock.progress(d));
             }
-        } else if let Some(release) = &mut self.release {
-            let wet = &mut self.b[..frames * 2];
-            wet.copy_from_slice(&self.a[..frames * 2]);
-            release.filter.process(wet, frames);
-            for i in 0..frames {
-                let dry = ((release.done + i) as f32 / release.len as f32).min(1.0);
-                for ch in 0..2 {
-                    let at = i * 2 + ch;
-                    self.a[at] = wet[at] * (1.0 - dry) + self.a[at] * dry;
+        } else {
+            if let Some(release) = &mut self.release {
+                let wet = &mut self.b[..frames * 2];
+                wet.copy_from_slice(&self.a[..frames * 2]);
+                release.filter.process(wet, frames);
+                for i in 0..frames {
+                    let dry = ((release.done + i) as f32 / release.len as f32).min(1.0);
+                    for ch in 0..2 {
+                        let at = i * 2 + ch;
+                        self.a[at] = wet[at] * (1.0 - dry) + self.a[at] * dry;
+                    }
+                }
+                release.done += frames;
+                if release.done >= release.len {
+                    self.release = None;
                 }
             }
-            release.done += frames;
-            if release.done >= release.len {
-                self.release = None;
+            if let Some(lift) = &mut self.lift {
+                for i in 0..frames {
+                    let g = lift.gain(i);
+                    self.a[i * 2] *= g;
+                    self.a[i * 2 + 1] *= g;
+                }
+                lift.done += frames;
+                if lift.done >= lift.len {
+                    self.lift = None;
+                }
             }
         }
         self.block[..frames * 2].copy_from_slice(&self.a[..frames * 2]);
         if let Some(fade) = &mut self.fade {
+            let mut last_in = 1.0f32;
             for i in 0..frames {
-                let p = fade.clock.progress(fade.done + i as u64);
-                let (mut gout, mut gin) = blend_gains(fade.curve, fade.k, p, fade.overlap_ms);
-                if fade.headroom_db > 0.0 {
-                    let h = headroom(fade.headroom_db, p);
-                    gout *= h;
-                    gin *= h;
-                }
-                let (gout, gin) = (gout as f32, gin as f32);
+                let at = fade.done + i as u64;
+                let (gout, gin) = match fade.cut {
+                    // A cut lets the outgoing song go, the incoming one held.
+                    Some(cut) => {
+                        let gone = ((at.saturating_sub(cut.at) + 1) as f32 / cut.len as f32).min(1.0);
+                        (cut.out_from * (1.0 - gone), cut.in_from)
+                    }
+                    None => fade.gains_at(at),
+                };
                 self.block[i * 2] = self.a[i * 2] * gin + self.b[i * 2] * gout;
                 self.block[i * 2 + 1] = self.a[i * 2 + 1] * gin + self.b[i * 2 + 1] * gout;
+                last_in = gin;
             }
             fade.done += frames as u64;
-            if fade.done >= fade.clock.end() || fade.outgoing.is_ended() {
+            if let Some(cut) = fade.cut
+                && fade.done >= cut.end()
+            {
+                // The cut is over: the incoming song comes up to its own
+                // level from where it was held.
                 self.failures.extend(fade.outgoing.lane.take_failures());
                 self.end_fade();
+                if cut.in_from < 1.0 {
+                    let len = ((LIFT_SECS * self.rate as f64) as usize).max(1);
+                    self.lift = Some(Lift { from: cut.in_from as f64, done: 0, len });
+                }
+                return (frames, MixState::Playing);
+            }
+            let (cut_short, on_time) = (fade.done < fade.clock.end(), fade.on_time);
+            if !cut_short || fade.outgoing.is_ended() {
+                self.failures.extend(fade.outgoing.lane.take_failures());
+                self.end_fade();
+                // The outgoing song ended inside the blend: the incoming one
+                // comes up to its own level from where it was, not at once.
+                if cut_short && on_time && last_in < 1.0 {
+                    let len = ((LIFT_SECS * self.rate as f64) as usize).max(1);
+                    self.lift = Some(Lift { from: last_in as f64, done: 0, len });
+                }
             }
         }
         (frames, MixState::Playing)
@@ -927,8 +1240,27 @@ impl Mixer {
             return;
         }
         let from = old.current().key();
+        // A song whose sound ran out before the blend's start, nothing of it
+        // left in its rate stage either, has nothing to blend: the next one
+        // becomes the lane at its own level, a gapless join.
+        let easing_left = self
+            .rated
+            .as_ref()
+            .is_some_and(|r| r.key == from && (r.available() > 0 || r.stretch.pending() > 0));
+        if old.ran_dry() && !easing_left {
+            self.failures.extend(old.take_failures());
+            self.lift = None;
+            self.rated = None;
+            self.lane = Some(Lane::new(plan.deck, plan.loudness, &self.settings.replay_gain, self.rate));
+            self.next_transition = Some(Transition::Gapless);
+            return;
+        }
+        // A song whose sound stopped short of the blend's start begins it as
+        // it runs dry.
+        let on_time = !old.ran_dry();
         old.set_next(None, Loudness::default());
         old.last = true;
+        self.lift = None;
         let to = plan.deck.key();
         let incoming = Lane::new(plan.deck, plan.loudness, &self.settings.replay_gain, self.rate);
         self.lane = Some(incoming);
@@ -946,6 +1278,10 @@ impl Mixer {
             frames: plan.frames,
             done: 0,
             clock: FadeClock { frames: plan.frames, rush: None },
+            kind: shape.kind,
+            hold_share: shape.hold_share,
+            rise_share: shape.rise_share,
+            intro_level: shape.intro_level,
             k: shape.k,
             curve: shape.curve,
             overlap_ms: plan.frames as f64 * 1_000.0 / self.rate as f64,
@@ -953,6 +1289,12 @@ impl Mixer {
             gate,
             quiet: 0,
             headroom_db: shape.headroom_db,
+            on_time,
+            both_heard_ms: shape.both_heard_ms,
+            lock_ms: shape.lock_ms,
+            drift_gap: shape.drift_gap,
+            cut_at: None,
+            cut: None,
         });
     }
 }

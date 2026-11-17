@@ -5,8 +5,9 @@ import SwiftUI
 
 /// Drive steps for the player's states (see `Drive`):
 ///
-/// - `crossfade:on`, `crossfade:off`, `crossfade:SECONDS` turns crossfade on at that length
-/// - `automix:on`, `automix:off` turns crossfade on with smart transitions on or off;
+/// - `crossfade:on` picks Crossfade, `crossfade:SECONDS` Crossfade at that length,
+///   `crossfade:off` Gapless
+/// - `automix:on` picks Automix; `automix:off` picks Crossfade, or keeps Gapless;
 ///   `filters:on|off`, `matchtempo:on|off`
 /// - `blend` jumps to 30 s before the end of the song, to hear the next one come in
 /// - `radio` starts radio from the song on now; `radio:TEXT` from the first song a search finds
@@ -23,6 +24,11 @@ import SwiftUI
 /// - `prefetch:WIFI` or `prefetch:WIFI,MOBILE` sets how many songs are fetched ahead
 /// - `savedstate` shows how many of the next songs are saved whole on the phone
 /// - `playstate` shows a line with what the player is doing
+/// - `mixtap:on`, `mixtap:on:PERIOD_MS` turns on the mix tap (click tracks with a click every
+///   PERIOD_MS, 500 when left out), `mixtap:off`, `mixtap:dump` writes what it holds now
+/// - `mixtap:holdmain:MS` holds the main thread that long (a late acknowledgement)
+/// - `mixtap:stall:A:MS`, `mixtap:stall:B:MS` stops the song on now (A) or the spare (B) getting
+///   sound for that long
 @MainActor
 enum PlaybackDrive {
     static func install(player: Player, router: Router, overlays: Overlays) {
@@ -31,21 +37,29 @@ enum PlaybackDrive {
         }
     }
 
+    /// Blocks the main thread for `ms`, as a busy main thread would: an acknowledgement comes late.
+    private static func holdMain(ms: Double) {
+        Thread.sleep(forTimeInterval: ms / 1_000)
+    }
+
     private static func step(_ name: String, _ value: String, player: Player, router: Router, overlays: Overlays) async -> Bool {
         let settings = AppSettings.shared
         switch name {
         case "crossfade":
             if value == "off" {
-                settings.setCrossfade(false)
+                settings.editBetweenSongs(.choose(.gapless))
             } else {
-                settings.setCrossfade(true)
-                if let seconds = Int(value) { settings.setCrossfadeSeconds(seconds) }
+                settings.editBetweenSongs(.choose(.crossfade))
+                if let seconds = Int(value) { settings.editBetweenSongs(.length(seconds)) }
             }
         case "automix":
-            settings.setCrossfade(value != "off" || settings.player.crossfade)
-            settings.setSmartTransitions(value != "off")
-        case "filters": settings.setFilterSweeps(value != "off")
-        case "matchtempo": settings.setMatchTempo(value != "off")
+            if value != "off" {
+                settings.editBetweenSongs(.choose(.automix))
+            } else if settings.player.betweenSongs != .gapless {
+                settings.editBetweenSongs(.choose(.crossfade))
+            }
+        case "filters": settings.editBetweenSongs(.filterSweeps(value != "off"))
+        case "matchtempo": settings.editBetweenSongs(.matchTempo(value != "off"))
         case "blend":
             if player.duration > 40 { player.seek(to: player.duration - 30) }
         case "radio":
@@ -117,10 +131,27 @@ enum PlaybackDrive {
                 if await StreamCache.shared.isFullySaved(key) { saved += 1 }
             }
             router.show("\(saved) of the next \(servers) server songs saved whole")
+        case "mixtap":
+            let parts = value.split(separator: ":").map(String.init)
+            let output = player.engine.output
+            switch parts.first {
+            case "on":
+                if parts.count > 1, let period = Double(parts[1]) { MixTapReport.shared.periodMs = period }
+                output.tap.start()
+            case "off": output.tap.stop()
+            case "dump": MixTapReport.shared.dump(output)
+            case "holdmain": holdMain(ms: Double(parts.last ?? "") ?? 300)
+            case "stall":
+                let ms = parts.count > 2 ? Int(parts[2]) ?? 4_000 : 4_000
+                let deck = parts.count > 1 && parts[1] == "B" ? player.engine.crossfader.spare : player.engine.deck
+                deck.current?.stallUntilMs.store(Int(ProcessInfo.processInfo.systemUptime * 1_000) + ms, ordering: .relaxed)
+            default: break
+            }
         case "playstate":
             let quality = player.quality.map { "\($0.label) \($0.full)" } ?? "no badge"
-            let fade = settings.player.crossfade ? "crossfade \(settings.player.crossfadeSeconds) s" : "no crossfade"
-            router.show("\(player.isPlaying ? "Playing" : "Paused") \(player.index + 1) of \(player.queue.count), \(fade), \(sleepSummary(player.sleepState)), \(quality)")
+            // "automix", "crossfade 8 s" or "gapless".
+            let between = SettingsSummaries.betweenSongs(settings.player).lowercased()
+            router.show("\(player.isPlaying ? "Playing" : "Paused") \(player.index + 1) of \(player.queue.count), \(between), \(sleepSummary(player.sleepState)), \(quality)")
         default:
             return false
         }

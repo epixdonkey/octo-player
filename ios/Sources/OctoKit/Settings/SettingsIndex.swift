@@ -61,15 +61,15 @@ public struct SettingEntry: Sendable, Hashable, Identifiable {
 /// Every setting, written down once. The rows take their titles from here, so what search finds
 /// is always what the page shows. The order breaks ties between equally good matches.
 public enum SettingsIndex {
-    // Playback
-    public static let crossfade = SettingEntry("crossfade", .playback, "Crossfade", "Each song fades into the next",
-                                               ["fade", "blend", "gapless", "transition", "mix"])
-    public static let crossfadeLength = SettingEntry("crossfade_length", .playback, "Longest blend", "The most seconds two songs blend for",
-                                                     ["fade", "seconds", "duration", "crossfade length"])
+    // Playback. Between songs keeps the id the Crossfade switch had, and the rows under it keep
+    // theirs.
+    public static let betweenSongs = SettingEntry("crossfade", .playback, "Between songs", "Gapless, Crossfade or Automix",
+                                                  ["crossfade", "gapless", "automix", "blend", "mix", "transition", "dj", "smart transitions",
+                                                   "between songs", "fade"])
+    public static let crossfadeLength = SettingEntry("crossfade_length", .playback, "Length", "How many seconds a crossfade lasts",
+                                                     ["fade", "seconds", "duration", "crossfade length", "longest blend"])
     public static let crossfadeCurve = SettingEntry("crossfade_curve", .playback, "Crossfade curve", "How the two volumes cross in a blend",
                                                     ["curve", "fade", "linear", "s-curve", "equal power", "logarithmic", "loudness", "dj", "overlap"])
-    public static let smartTransitions = SettingEntry("smart_transitions", .playback, "Smart transitions", "Each blend starts where the songs meet best",
-                                                      ["automix", "dj", "mix", "transition", "beat", "outro"])
     public static let filterSweeps = SettingEntry("filter_sweeps", .playback, "Filter sweeps", "Songs thin out as they cross",
                                                   ["filter", "sweep", "bass", "eq", "dj"])
     public static let matchTempo = SettingEntry("match_tempo", .playback, "Match tempo", "The next song nudges its speed to the beat",
@@ -117,6 +117,12 @@ public enum SettingsIndex {
     public static let sound: [SettingEntry] = SoundSearchEntry.all.map { SettingEntry($0.id, .sound, $0.title, $0.summary, $0.keywords) }
 
     // Appearance
+    public static let theme = SettingEntry("theme", .appearance, "Theme", "The colors of every page, card, menu and control",
+                                           ["theme", "light mode", "dark mode", "night", "day", "colors", "palette", "appearance"],
+                                           section: "Theme")
+    public static let themeMatch = SettingEntry("theme_match", .appearance, "Match the system",
+                                                "A light theme while the phone is light, a dark one while it is dark",
+                                                ["match", "system", "automatic", "day", "night"], section: "Theme")
     public static let ambient = SettingEntry("ambient", .appearance, "Ambient color from the artwork", "The artwork's colors glowing behind the pages",
                                              ["glow", "background", "colours", "colors", "theme", "strength"])
     public static let ambientHome = SettingEntry("ambient_home", .appearance, "Home", "The glow on the home page", ["glow"], section: "Where it shows")
@@ -158,8 +164,7 @@ public enum SettingsIndex {
                                                     "Designed covers, or the covers of their albums",
                                                     ["playlist", "cover", "artwork", "mosaic", "picture", "designed"], section: "Playlists")
     public static let accentColor = SettingEntry("accent_color", .appearance, "Accent color", "The color of selections, sliders, switches and buttons",
-                                                 ["accent", "color", "colour", "theme", "tint", "highlight", "palette", "album art", "cover",
-                                                  "personalize"],
+                                                 ["accent", "color", "colour", "tint", "highlight", "album art", "cover", "personalize"],
                                                  section: "Accent color")
     public static let glassTint = SettingEntry("accent_glass", .appearance, "Color the glass", "The bar, glass buttons and toasts take the accent too",
                                                ["glass", "glaze", "frosted", "bar", "tint", "accent", "color", "colour", "theme"], section: "Accent color")
@@ -260,6 +265,8 @@ public enum SettingsIndex {
                                                 ["free space", "storage", "delete"], section: "Cache")
     public static let downloadQuality = SettingEntry("download_quality", .streaming, "Download quality", "The file downloads come as",
                                                      ["bitrate", "kbps", "offline"], section: "Downloads")
+    public static let downloadFormat = SettingEntry("download_format", .streaming, DownloadFormat.title, DownloadFormat.help,
+                                                    ["opus", "aac", "mp3", "format", "codec", "offline"], section: "Downloads")
     public static let wifiOnly = SettingEntry("wifi_only", .streaming, "Download on Wi-Fi only", "Downloads wait for Wi-Fi", ["mobile data", "cellular"],
                                               section: "Downloads")
     public static let keepLiked = SettingEntry("keep_liked", .streaming, "Keep Liked songs downloaded", "Liked songs follow your likes offline",
@@ -329,11 +336,11 @@ public enum SettingsIndex {
 
     /// Every setting, in the order written.
     public static let all: [SettingEntry] = [
-        crossfade, crossfadeLength, crossfadeCurve, smartTransitions, filterSweeps, matchTempo, speed, skipSilence, songSwipe, autoplay,
+        betweenSongs, crossfadeLength, crossfadeCurve, filterSweeps, matchTempo, speed, skipSilence, songSwipe, autoplay,
         resumeWired, resumeBluetooth, resumeAlways, castKeepPlaying,
         radioDiscovery, radioAdventure, radioVariety, radioFavorites, liveRadioNear, radioStations,
     ] + sound + [
-        ambient, ambientHome, ambientLibrary, ambientSearch, ambientSettings, ambientBar, ambientPageArtwork, homeSections,
+        theme, themeMatch, ambient, ambientHome, ambientLibrary, ambientSearch, ambientSettings, ambientBar, ambientPageArtwork, homeSections,
         playerBackground, animatedArt, liveBackground, backgroundBrightnessCap, backgroundSaturation, backgroundContrast, backgroundUseBpm,
         backgroundSpeed, backgroundFps, playlistCovers, accentColor, glassTint, reduceMotion,
         phoneAccess, phoneSongs, rescan, libraryOnly, musicFolders,
@@ -341,7 +348,7 @@ public enum SettingsIndex {
         changePassword, serverKind, serverAnswer, serverScan, octoAdmin, importMusic, family, signInElsewhere, lastSynced, syncNow,
         queueSync, playlistsToServer, shares, scanServer, listeningNow, disconnect,
         copies, accountHome, accountAway, deviceQuality, streamWifi, startAfter, streamMobile, cacheSize, fetchWifi, fetchMobile,
-        clearCache, downloadQuality, wifiOnly, keepLiked, streamOnWifi, downloadedMusic,
+        clearCache, downloadQuality, downloadFormat, wifiOnly, keepLiked, streamOnWifi, downloadedMusic,
         lyricsOnline, lyricsScreenOn, lyricsStyle, lyricsEmphasis, lyricsGlow, lyricsLift, lyricsMotionSpeed, lyricsInactiveScale,
         lyricsFade, lyricsCascade, lyricsKeepCompleted, lyricsArc, lyricsBloomFast, lyricsOutputTiming,
         listenBrainz, sendPlays, nowPlaying, scrobblingDisconnect,
@@ -350,6 +357,15 @@ public enum SettingsIndex {
     ]
 
     public static func byId(_ id: String) -> SettingEntry? { all.first { $0.id == id } }
+
+    /// The updater's own rows, which a copy that does not update itself never shows.
+    public static let updaterRows: Set<String> = [checkUpdates.id, earlyVersions.id, checkNow.id]
+
+    /// What Settings search looks through: every setting, less the updater's rows while the
+    /// updater is off.
+    public static func searchable(updaterOn: Bool) -> [SettingEntry] {
+        updaterOn ? all : all.filter { !updaterRows.contains($0.id) }
+    }
 }
 
 /// How well a setting matches, best first: the title begins with what was typed, every word is

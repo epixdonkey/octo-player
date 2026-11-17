@@ -52,10 +52,16 @@ object OctoIcons {
     val StarFilled by sym("sym_star_filled")
     val Lyrics by sym("sym_lyrics")
     val Folder by sym("sym_folder")
+
+    // A folder of playlists, set apart from the music Folders page's glyph.
+    val PlaylistFolder by sym("sym_playlist_folder")
     val Sort by sym("sym_sort")
     val Ascending by sym("sym_arrow_upward")
     val Descending by sym("sym_arrow_downward")
     val Info by sym("sym_info")
+    // What an error note leads with: filled, a shape of its own beside the
+    // info circle, whatever the accent.
+    val Error by sym("sym_error_fill")
     val Select by sym("sym_check_circle")
     val Close by sym("sym_close")
     val History by sym("sym_history")
@@ -94,8 +100,30 @@ object OctoIcons {
     // address is set.
     val Globe by sym("sym_globe")
     val Lock by sym("sym_lock")
+    val LockOpen by sym("sym_lock_open")
     // Signing out of a server: an arrow leaving a box.
     val SignOut by sym("sym_sign_out")
+
+    // Settings' own cards and sections: songs kept on this computer, keeping
+    // a server well, crossfeed between the ears, the mini and full player,
+    // a family plan, requests waiting, motion and startup.
+    val HardDrive by sym("sym_hard_drive")
+    val Wrench by sym("sym_wrench")
+    val LeftRight by sym("sym_arrows_left_right")
+    val PictureInPicture by sym("sym_picture_in_picture")
+    val Enlarge by sym("sym_arrows_out")
+    val Plan by sym("sym_identification_card")
+    val Hourglass by sym("sym_hourglass")
+    val Wave by sym("sym_waves")
+    val Power by sym("sym_power")
+
+    // The window's background, what the server is, and Octo's own updates.
+    val Backdrop by sym("sym_square_half")
+    val Database by sym("sym_database")
+    val Upgrade by sym("sym_arrow_circle_up")
+
+    // More switches, for a card that holds a few of them.
+    val Switches by sym("sym_toggle_right")
 
     // Back and forward through the pages, and opening the full player: the
     // chevron turned.
@@ -133,6 +161,7 @@ val allIcons: List<Pair<String, () -> ImageVector>> = listOf(
     "Sound" to { OctoIcons.Sound }, "Star" to { OctoIcons.Star }, "StarFilled" to { OctoIcons.StarFilled },
     "Lyrics" to { OctoIcons.Lyrics }, "Folder" to { OctoIcons.Folder }, "Sort" to { OctoIcons.Sort },
     "Ascending" to { OctoIcons.Ascending }, "Descending" to { OctoIcons.Descending }, "Info" to { OctoIcons.Info },
+    "Error" to { OctoIcons.Error }, "LockOpen" to { OctoIcons.LockOpen },
     "Select" to { OctoIcons.Select }, "Close" to { OctoIcons.Close }, "History" to { OctoIcons.History },
     "Pin" to { OctoIcons.Pin }, "Pinned" to { OctoIcons.Pinned },
     "RemoveFromPlaylist" to { OctoIcons.RemoveFromPlaylist }, "Playback" to { OctoIcons.Playback },
@@ -144,5 +173,9 @@ val allIcons: List<Pair<String, () -> ImageVector>> = listOf(
     "Expand" to { OctoIcons.Expand }, "Collapse" to { OctoIcons.Collapse }, "Home" to { OctoIcons.Home },
     "Settings" to { OctoIcons.Settings }, "Reveal" to { OctoIcons.Reveal }, "Conceal" to { OctoIcons.Conceal },
     "Minimize" to { OctoIcons.Minimize }, "Maximize" to { OctoIcons.Maximize }, "Restore" to { OctoIcons.Restore },
-    "SignOut" to { OctoIcons.SignOut },
+    "SignOut" to { OctoIcons.SignOut }, "HardDrive" to { OctoIcons.HardDrive }, "Wrench" to { OctoIcons.Wrench },
+    "LeftRight" to { OctoIcons.LeftRight }, "PictureInPicture" to { OctoIcons.PictureInPicture }, "Enlarge" to { OctoIcons.Enlarge },
+    "Plan" to { OctoIcons.Plan }, "Hourglass" to { OctoIcons.Hourglass }, "Wave" to { OctoIcons.Wave }, "Power" to { OctoIcons.Power },
+    "Backdrop" to { OctoIcons.Backdrop }, "Database" to { OctoIcons.Database }, "Upgrade" to { OctoIcons.Upgrade },
+    "Switches" to { OctoIcons.Switches },
 )

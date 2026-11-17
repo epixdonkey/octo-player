@@ -34,6 +34,7 @@ struct OctoApp: App {
         let session = Session()
         let sound = SoundStore()
         let router = Router()
+        router.session = session
         let data = DataServices(session: session) { words, done in router.show(words, done: done) }
         _data = State(initialValue: data)
         _router = State(initialValue: router)
@@ -64,7 +65,7 @@ struct OctoApp: App {
         _lyrics = State(initialValue: LyricsStore(session: session, library: data.library, player: player))
         _artworkColors = State(initialValue: ArtworkColorStore(session: session))
         data.start()
-        SegmentedAccent.tint()
+        SegmentedAccent.tint(ThemeState.shared.resolved)
         let accounts = Accounts(session: session, router: router)
         _accounts = State(initialValue: accounts)
         let entries = SystemEntries(session: session, player: player, router: router, accounts: accounts)
@@ -110,7 +111,6 @@ struct OctoApp: App {
                 .environment(accounts)
                 .task { accounts.start() }
                 .motionScaled(motion)
-                .preferredColorScheme(.dark)
                 #if DEBUG
                 .task { PlaybackDrive.install(player: player, router: router, overlays: overlays)
                         SystemDrive.install(router: router)
@@ -125,11 +125,12 @@ struct OctoApp: App {
     }
 }
 
-/// Octo opens on its library whether or not a server is signed in; a server is an add-on.
+/// Octo opens on its library whether or not a server is signed in; a server is an add-on. It is
+/// drawn in the theme `ThemeState` resolves.
 struct RootView: View {
     var body: some View {
         MainShell()
             .systemEntries()
-            .keepsAccent()
+            .keepsTheme()
     }
 }

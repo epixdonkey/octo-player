@@ -30,6 +30,7 @@ import app.winters.octo.ui.menu.SongAction.StartRadio
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SongActionsTest {
@@ -45,7 +46,7 @@ class SongActionsTest {
 
     @Test
     fun findSongsComesAfterTheInfo_ForFoundAndLibrarySongsAlike() {
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info, FindSongs), songActions(find = true, radio = false, findSongs = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, Info, FindSongs), songActions(find = true, radio = false, findSongs = true))
         assertEquals(listOf(Info, FindSongs), songMenuGroups(songActions(find = false, radio = false, findSongs = true))[3])
         assertEquals(false, FindSongs in songActions(find = false, radio = true))
     }
@@ -59,7 +60,7 @@ class SongActionsTest {
         )
         // A song found online plays somewhere and through the equalizer too.
         assertEquals(
-            listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info, FindSongs, Cast, Sound),
+            listOf(PlayNext, AddToQueue, Download, Info, FindSongs, Cast, Sound),
             songActions(find = true, radio = false, findSongs = true, place = player),
         )
         // Anywhere else, neither: a row held on a page is about the song only.
@@ -84,7 +85,15 @@ class SongActionsTest {
 
     @Test
     fun aSongFoundOnlineNeverOffersFindInFlac() {
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false, upgrade = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, upgrade = true))
+    }
+
+    @Test
+    fun aSongTheServerOwnsOffersNoDownloadOrRequest_ButItsHeart() {
+        assertEquals(
+            listOf(PlayNext, AddToQueue, StartRadio, Like, Info),
+            songActions(find = true, radio = true, requestCopy = true, owned = true),
+        )
     }
 
     @Test
@@ -100,8 +109,8 @@ class SongActionsTest {
         val actions = songActions(find = false, radio = true, lastPlaylist = true)
         assertEquals(listOf(PlayNext, AddToQueue, StartRadio, AddToLastPlaylist, AddToPlaylist, Like, Rate, GoToAlbum, GoToArtist, Info), actions)
         assertEquals(listOf(AddToLastPlaylist, AddToPlaylist, Like, Rate), songMenuGroups(actions)[1])
-        // A song found online goes in a playlist too, the last one first.
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToLastPlaylist, AddToPlaylist, Info), songActions(find = true, radio = false, lastPlaylist = true))
+        // A song found online cannot go in a playlist yet.
+        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, lastPlaylist = true))
     }
 
     @Test
@@ -119,7 +128,7 @@ class SongActionsTest {
             songActions(find = false, radio = true, share = true),
         )
         // A find is never shared: it is not in the server's library.
-        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, AddToPlaylist, Info), songActions(find = true, radio = true, share = true))
+        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, Info), songActions(find = true, radio = true, share = true))
     }
 
     @Test
@@ -145,13 +154,13 @@ class SongActionsTest {
 
     @Test
     fun aFindHasNoPhoneFile() {
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false, phone = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, phone = true))
     }
 
     @Test
     fun aFindOffersADownloadInsteadOfLibraryChoices() {
-        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, AddToPlaylist, Info), songActions(find = true, radio = true))
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false))
+        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, Info), songActions(find = true, radio = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false))
     }
 
     @Test
@@ -168,7 +177,7 @@ class SongActionsTest {
             songActions(find = false, radio = true, offline = true),
         )
         // A find downloads to the server first, never straight to the phone.
-        assertEquals(listOf(PlayNext, AddToQueue, Download, AddToPlaylist, Info), songActions(find = true, radio = false, offline = true))
+        assertEquals(listOf(PlayNext, AddToQueue, Download, Info), songActions(find = true, radio = false, offline = true))
     }
 
     @Test
@@ -207,10 +216,10 @@ class SongActionsTest {
     @Test
     fun aFamilyMemberWhoAsksGetsRequestACopyBesideTheAdd() {
         assertEquals(
-            listOf(PlayNext, AddToQueue, SongAction.Download, SongAction.RequestCopy, AddToPlaylist, Info),
+            listOf(PlayNext, AddToQueue, SongAction.Download, SongAction.RequestCopy, Info),
             songActions(find = true, radio = false, requestCopy = true),
         )
-        assertEquals(listOf(AddToPlaylist, SongAction.Download, SongAction.RequestCopy), songMenuGroups(songActions(find = true, radio = false, requestCopy = true))[1])
+        assertEquals(listOf(SongAction.Download, SongAction.RequestCopy), songMenuGroups(songActions(find = true, radio = false, requestCopy = true))[1])
         // Never on a library song.
         assertEquals(false, SongAction.RequestCopy in songActions(find = false, radio = false, requestCopy = true))
     }
@@ -220,5 +229,36 @@ class SongActionsTest {
         val groups = songMenuGroups(songActions(find = false, radio = false, removeFromMine = true, disk = true))
         assertEquals(listOf(SongAction.RemoveFromMyLibrary, DeleteFromDisk), groups.last())
         assertEquals(false, SongAction.RemoveFromMyLibrary in songActions(find = true, radio = false, removeFromMine = true))
+    }
+
+    // Try another version: for a song found online, in the player, on a
+    // server that lets this listener choose, never for a find that is the
+    // server's own song; after Find songs, among the ways to look into it.
+    @Test
+    fun tryAnotherVersionIsOnlyForAFindPlayingFromAServerThatLetsTheListenerChoose() {
+        val player = MenuPlace(inPlayer = true)
+        val all = songActions(find = true, radio = true, place = player, findSongs = true, streamVersions = true)
+        assertEquals(listOf(PlayNext, AddToQueue, StartRadio, Download, Info, FindSongs, SongAction.TryAnotherVersion, Cast, Sound), all)
+        assertEquals(listOf(Info, FindSongs, SongAction.TryAnotherVersion), songMenuGroups(all)[2])
+        // Each condition alone keeps it away.
+        assertFalse(SongAction.TryAnotherVersion in songMenuGroups(songActions(find = false, radio = true, place = player, streamVersions = true)).flatten())
+        assertFalse(SongAction.TryAnotherVersion in songMenuGroups(songActions(find = true, radio = true, streamVersions = true)).flatten())
+        assertFalse(SongAction.TryAnotherVersion in songMenuGroups(songActions(find = true, radio = true, place = player)).flatten())
+        assertFalse(
+            SongAction.TryAnotherVersion in songMenuGroups(songActions(find = true, radio = true, place = player, streamVersions = true, owned = true)).flatten(),
+        )
+        // Without Find songs it comes right after the info.
+        assertEquals(
+            listOf(Info, SongAction.TryAnotherVersion),
+            songMenuGroups(songActions(find = true, radio = false, place = player, streamVersions = true))[2],
+        )
+    }
+
+    @Test
+    fun theGateNeedsAnOctoServerListingStreamVersions() {
+        assertTrue(offersStreamVersions(isOcto = true, extensions = setOf("octoStreamVersions:1", "octoStreamVersionChanges:1")))
+        // A family's Listener or Kid gets only the changes.
+        assertFalse(offersStreamVersions(isOcto = true, extensions = setOf("octoStreamVersionChanges:1")))
+        assertFalse(offersStreamVersions(isOcto = false, extensions = setOf("octoStreamVersions:1")))
     }
 }

@@ -1,6 +1,9 @@
 package app.winters.octo.desktop.a11y
 
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.InternalComposeUiApi
@@ -16,27 +19,37 @@ import androidx.compose.ui.unit.Density
 import app.winters.octo.design.ArrowKeys
 import app.winters.octo.design.FocusVisibility
 import app.winters.octo.design.LocalTyping
+import app.winters.octo.design.ProvideOctoTheme
 import app.winters.octo.design.ProvideWindowLook
 import app.winters.octo.design.TypingState
 import app.winters.octo.desktop.AppState
 import app.winters.octo.desktop.FakeServer
+import app.winters.octo.desktop.hotkeys.FakeHotkeys
+import app.winters.octo.desktop.settings.AppPlaces
+import app.winters.octo.desktop.system.LocalSystem
+import app.winters.octo.desktop.system.SystemIntegration
 import app.winters.octo.desktop.player.DesktopPlayer
 import app.winters.octo.desktop.player.SilentPlayer
 import app.winters.octo.desktop.secrets.SessionOnlySecrets
 import app.winters.octo.desktop.server.Accounts
+import app.winters.octo.desktop.server.SignInOutcome
+import app.winters.octo.desktop.server.readCapped
 import app.winters.octo.desktop.settings.AppSettings
 import app.winters.octo.desktop.settings.DesktopOs
 import app.winters.octo.desktop.settings.SettingsStore
 import app.winters.octo.desktop.songJson
 import app.winters.octo.desktop.ui.Shell
+import app.winters.octo.desktop.update.DesktopUpdates
 import app.winters.octo.lyrics.OnlineLyrics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import java.io.File
+import java.nio.file.Path
 import javax.swing.SwingUtilities
 
 // The whole window, signed in to a pretend server with a small library, on
@@ -60,6 +73,30 @@ class A11yScene(
     extensions: List<String> = listOf(),
     // What plays: the silent player unless a test brings its own.
     player: DesktopPlayer = SilentPlayer(),
+    // Around the window, for a test that sets something for all of it.
+    wrap: @Composable (@Composable () -> Unit) -> Unit = { it() },
+    // The system the app runs on.
+    os: DesktopOs = DesktopOs.Windows,
+    // Ties to the system (its tray, notifications, mini player, keys from
+    // any app, and Discord in a build with it), made with the app when
+    // asked for; keys are claimed from a pretend system.
+    withSystem: Boolean = false,
+    // More answers for the pretend server, given after the usual ones (so
+    // they can replace them) and before the app starts.
+    serve: (FakeServer) -> Unit = {},
+    // The updater, made with the window's settings, when a test wants one.
+    updates: ((SettingsStore) -> DesktopUpdates)? = null,
+    // Signed in the usual way, so the server is kept in Settings' list and
+    // its checks are asked of it, rather than handed to the app as it is.
+    saved: Boolean = false,
+    // The settings the window runs on, when a test brings its own (a
+    // session that saves nothing, say); else a file in `folder`.
+    store: SettingsStore? = null,
+    // No server: the window shows the sign-in page.
+    signedOut: Boolean = false,
+    // How certificate files are read: from the disk, unless a test holds
+    // its reads.
+    readCertificate: (Path) -> ByteArray = ::readCapped,
 ) : AutoCloseable {
     val server = FakeServer()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -67,6 +104,8 @@ class A11yScene(
     val keyboard = FocusVisibility(keyboard = true)
     val arrows = ArrowKeys()
     lateinit var app: AppState
+    var system: SystemIntegration? = null
+        private set
     val scene: ImageComposeScene
 
     init {
@@ -83,29 +122,49 @@ class A11yScene(
         server.answer("getPlaylists", """"playlists":{"playlist":[{"id":"p1","name":"Late night","songCount":2}]}""")
         server.answer("search3", """"searchResult3":{"song":[$songs]}""")
         server.answer("getStarred2", """"starred2":{}""")
-        val settings = SettingsStore(File(folder, "settings.json"), 0)
+        if (saved) {
+            server.answer("ping")
+            server.answer("getOpenSubsonicExtensions", """"openSubsonicExtensions":[${extensions.joinToString(",") { """{"name":"${it.substringBefore(':')}","versions":[${it.substringAfter(':')}]}""" }}]""")
+        }
+        serve(server)
+        val settings = store ?: SettingsStore(File(folder, "settings.json"), 0)
         settings.update { look(it.copy(lyrics = it.lyrics.copy(online = false))) }
         val http = OkHttpClient()
+        val updater = updates?.invoke(settings)
+        val accounts = Accounts(settings, SessionOnlySecrets(), http, readCertificateBytes = readCertificate)
+        val restored = when {
+            signedOut -> null
+            saved -> (runBlocking { accounts.signIn(server.address, "winters", "pw") } as SignInOutcome.Done).connection
+            else -> server.connection(extensions)
+        }
         SwingUtilities.invokeAndWait {
             app = AppState(
                 settings,
-                Accounts(settings, SessionOnlySecrets(), http),
+                accounts,
                 http,
                 scope,
-                DesktopOs.Windows,
+                os,
                 player,
                 OnlineLyrics(http, server.address.toHttpUrl()),
-                restored = server.connection(extensions),
+                restored = restored,
                 listeningRoot = File(folder, "listening"),
+                updates = updater,
             )
+            if (withSystem) {
+                system = SystemIntegration(app, AppPlaces(File(folder, "config").apply { mkdirs() }, File(folder, "cache").apply { mkdirs() }), os, null, hotkeys = FakeHotkeys())
+            }
         }
-        waitFor { app.library?.index != null }
+        if (!signedOut) waitFor { app.library?.index != null }
         scene = ImageComposeScene(width, height, Density(1f)) {
-            ProvideWindowLook(reduceMotion = reduceMotion, focus = keyboard, arrows = arrows) {
-                CompositionLocalProvider(
-                    LocalTyping provides TypingState(),
-                    LocalDensity provides Density(1f, textScale),
-                ) { Shell(app, null) {} }
+            val palette by app.palette.collectAsState()
+            ProvideOctoTheme(palette) {
+                ProvideWindowLook(reduceMotion = reduceMotion, focus = keyboard, arrows = arrows) {
+                    CompositionLocalProvider(
+                        LocalTyping provides TypingState(),
+                        LocalDensity provides Density(1f, textScale),
+                        LocalSystem provides system,
+                    ) { wrap { Shell(app, null) {} } }
+                }
             }
         }
         render(4)
@@ -138,6 +197,27 @@ class A11yScene(
             Thread.sleep(30)
         }
         return image!!
+    }
+
+    // Draws in real time for at least `ms`, then on until nothing has been
+    // left to redraw (no fade still running) for `quiet` ms in a row, or
+    // until `most` has passed, and gives the last frame.
+    fun settleStill(ms: Long, quiet: Long, most: Long = 6_000): org.jetbrains.skia.Image {
+        val begin = System.nanoTime()
+        var stillSince: Long? = null
+        var image: org.jetbrains.skia.Image? = null
+        while (true) {
+            image?.close()
+            val now = System.nanoTime()
+            image = frameAt(now)
+            var busy = true
+            SwingUtilities.invokeAndWait { busy = scene.hasInvalidations() }
+            stillSince = if (busy) null else stillSince ?: now
+            val elapsed = (now - begin) / 1_000_000
+            val still = stillSince?.let { (now - it) / 1_000_000 >= quiet } ?: false
+            if ((elapsed >= ms && still) || elapsed >= most) return image
+            Thread.sleep(30)
+        }
     }
 
     // One frame drawn at a given moment of the scene's clock.
@@ -188,6 +268,7 @@ class A11yScene(
 
     override fun close() {
         runCatching { SwingUtilities.invokeAndWait { scene.close() } }
+        system?.let { runCatching { it.shortcuts.close() } }
         scope.cancel()
         server.close()
     }

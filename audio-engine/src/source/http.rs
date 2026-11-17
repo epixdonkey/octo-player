@@ -11,8 +11,9 @@
 //! its in-stream titles are taken out of the audio.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,12 +21,14 @@ use std::time::{Duration, Instant};
 use symphonia::core::io::MediaSource;
 
 use crate::error::{ErrorKind, Failure};
+use crate::live::Live;
+use crate::source::hls;
 use crate::source::icy::{IcySplitter, IcyStatus, StreamMeta};
-use ureq::unversioned::transport::{Buffers, ConnectionDetails, Connector, NextTimeout, Transport};
 use crate::source::trust::{PinnedTls, Trust};
+use ureq::unversioned::transport::{Buffers, ConnectionDetails, Connector, NextTimeout, Transport};
 
 /// How a stream is fetched.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HttpOptions {
     /// The client that fetches, with the certificates the engine trusts.
     pub agent: ureq::Agent,
@@ -38,8 +41,16 @@ pub struct HttpOptions {
     pub keep_behind: usize,
     /// Attempts in a row before giving up on a stream.
     pub max_retries: u32,
-    /// Extra request headers, such as a server's own.
+    /// Extra request headers, such as a server's own. They go only to the
+    /// origin (scheme, host and port) of the address opened, or to the same
+    /// host over https when that address is http, never to another one a
+    /// redirect names, and never show in `Debug`.
     pub headers: Vec<(String, String)>,
+    /// More request headers, such as a gateway's sign-in, sent on top of
+    /// `headers` but only over https to the same server: never over plain
+    /// http, the address opened included, never to another server, and
+    /// never shown in `Debug`.
+    pub secure_headers: Vec<(String, String)>,
     /// Set while the reader is waiting on the network.
     pub starved: Option<Arc<AtomicBool>>,
     /// Set by the owner to make a waiting read give up at once.
@@ -50,10 +61,24 @@ pub struct HttpOptions {
     /// The first wait before connecting to an ended live stream again. It
     /// doubles each time, four times, before the stream counts as gone.
     pub live_backoff: Duration,
+    /// A stream made on the way (asked for with a `format` other than `raw`),
+    /// which the deck seeks by opening it again at a time. A break, a stall,
+    /// an answer other than 2xx to a later request, or a later answer of
+    /// another type ends it with a failure to reopen, never another request
+    /// for its bytes.
+    pub by_time: bool,
+    /// How long the deck waits before opening a stream sought by time again
+    /// after its server answered busy.
+    pub reopen_wait: Duration,
     /// Where a live stream's titles go once the reader reaches them.
     pub titles: Option<Arc<TitleSlot>>,
     /// The address is an HLS playlist, whatever it looks like.
     pub hls: bool,
+    /// Counts the streams open on these options until their last fetch
+    /// thread lets go.
+    pub stream_count: &'static AtomicI64,
+    /// The same for HLS streams.
+    pub hls_count: &'static AtomicI64,
 }
 
 impl Default for HttpOptions {
@@ -65,13 +90,40 @@ impl Default for HttpOptions {
             keep_behind: 1 << 20,
             max_retries: 6,
             headers: Vec::new(),
+            secure_headers: Vec::new(),
             starved: None,
             cancel: None,
             live: false,
             live_backoff: Duration::from_secs(1),
+            by_time: false,
+            reopen_wait: Duration::from_secs(1),
             titles: None,
             hls: false,
+            stream_count: &crate::live::HTTP_STREAMS,
+            hls_count: &crate::live::HLS_STREAMS,
         }
+    }
+}
+
+// By hand, so header values, which can be passwords, never reach a log:
+// only their names show.
+impl fmt::Debug for HttpOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        let secure: Vec<&str> = self.secure_headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("HttpOptions")
+            .field("stall_timeout", &self.stall_timeout)
+            .field("read_ahead", &self.read_ahead)
+            .field("keep_behind", &self.keep_behind)
+            .field("max_retries", &self.max_retries)
+            .field("headers", &names)
+            .field("secure_headers", &secure)
+            .field("live", &self.live)
+            .field("live_backoff", &self.live_backoff)
+            .field("hls", &self.hls)
+            .field("by_time", &self.by_time)
+            .field("reopen_wait", &self.reopen_wait)
+            .finish_non_exhaustive()
     }
 }
 
@@ -117,10 +169,21 @@ pub fn agent(trust: Arc<Trust>) -> ureq::Agent {
 
 /// A client whose reads give up after `idle` with nothing arriving.
 fn agent_with_idle_limit(trust: Arc<Trust>, idle: Duration) -> ureq::Agent {
-    use ureq::unversioned::resolver::DefaultResolver;
+    agent_with_parts(trust, idle, ureq::unversioned::resolver::DefaultResolver::default())
+}
+
+/// The same, finding where each host is with `resolver`.
+fn agent_with_parts(
+    trust: Arc<Trust>,
+    idle: Duration,
+    resolver: impl ureq::unversioned::resolver::Resolver,
+) -> ureq::Agent {
     use ureq::unversioned::transport::{ConnectProxyConnector, Connector, TcpConnector};
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
+        // A redirect comes back as an answer: `follow` takes each hop, and
+        // decides what it is sent with.
+        .max_redirects(0)
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_send_request(Some(Duration::from_secs(10)))
         .timeout_recv_response(Some(Duration::from_secs(15)))
@@ -134,7 +197,7 @@ fn agent_with_idle_limit(trust: Arc<Trust>, idle: Duration) -> ureq::Agent {
             .chain(PinnedTls::new(trust))
             .chain(IcyStatus)
             .chain(IdleLimit(idle));
-    ureq::Agent::with_parts(config, connector, DefaultResolver::default())
+    ureq::Agent::with_parts(config, connector, resolver)
 }
 
 /// The longest a connection may give nothing while it is read. With no
@@ -151,7 +214,11 @@ struct IdleLimit(Duration);
 impl<In: Transport> Connector<In> for IdleLimit {
     type Out = IdleTransport<In>;
 
-    fn connect(&self, _details: &ConnectionDetails, chained: Option<In>) -> Result<Option<Self::Out>, ureq::Error> {
+    fn connect(
+        &self,
+        _details: &ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
         Ok(chained.map(|inner| IdleTransport { inner, limit: self.0 }))
     }
 }
@@ -187,7 +254,10 @@ impl<In: Transport> Transport for IdleTransport<In> {
 /// The wait for input, at most `limit`.
 fn idle_limited(timeout: NextTimeout, limit: Duration) -> NextTimeout {
     if timeout.after.is_not_happening() || *timeout.after > limit {
-        NextTimeout { after: ureq::unversioned::transport::time::Duration::Exact(limit), reason: timeout.reason }
+        NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::Exact(limit),
+            reason: timeout.reason,
+        }
     } else {
         timeout
     }
@@ -214,6 +284,8 @@ struct Shared {
     partial: bool,
     state: Mutex<State>,
     wake: Condvar,
+    // Held while the reader or any fetch thread still has this.
+    _live: Live,
 }
 
 struct State {
@@ -243,6 +315,9 @@ impl State {
 // in-stream titles.
 type Body = (ureq::BodyReader<'static>, Option<usize>);
 
+/// A server's answer, its body not read yet.
+pub(crate) type Answer = ureq::http::Response<ureq::Body>;
+
 // What asking for bytes from an offset gave.
 enum Opened {
     // The body, and how many bytes of it to skip to reach the offset.
@@ -260,8 +335,17 @@ impl HttpSource {
         let header = |name: &str| {
             response.headers().get(name).and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string())
         };
+        let content_type = header("content-type");
+        // No song is a web page, and no server refuses one the way a gateway
+        // does: either is a sign-in page that answered in the server's place.
+        // Live radio plays whatever its station sends.
+        let html = !live && is_html(content_type.as_deref());
+        let login = sends_login(url, &opts);
         let (ranges, len) = match status {
             200..300 if live => (false, None),
+            401 | 403 if !live && refusal_is_sign_in_page(status, response.headers(), login) => {
+                return Err(Failure::sign_in_page(status));
+            }
             206 => (true, header("content-range").as_deref().and_then(range_total)),
             200 => (
                 header("accept-ranges").is_some_and(|v| v.eq_ignore_ascii_case("bytes")),
@@ -269,8 +353,11 @@ impl HttpSource {
             ),
             other => return Err(Failure::http(other)),
         };
-        let content_type = header("content-type");
+        if html {
+            return Err(Failure::sign_in_page(status));
+        }
         let metaint = if live { metaint(&response) } else { None };
+        let counted = Live::new(opts.stream_count);
         let shared = Arc::new(Shared {
             url: url.to_string(),
             opts,
@@ -292,6 +379,7 @@ impl HttpSource {
                 last_title: None,
             }),
             wake: Condvar::new(),
+            _live: counted,
         });
         let body = response.into_body().into_reader();
         spawn_fetch(shared.clone(), 0, 0, Some((body, metaint)));
@@ -385,7 +473,13 @@ impl Read for HttpSource {
                 && state.last_progress.elapsed() > shared.opts.stall_timeout
             {
                 state.stalls += 1;
-                if state.stalls > shared.opts.max_retries {
+                if shared.opts.by_time {
+                    // Made on the way: its bytes from here may not be the ones
+                    // a new request sends, so the deck opens it at its time.
+                    log::warn!("a stream made on the way stalled");
+                    state.generation += 1;
+                    state.failure = Some(Failure::reopen_at_time("the stream stopped arriving"));
+                } else if state.stalls > shared.opts.max_retries {
                     state.failure = Some(Failure::new(ErrorKind::Network, "the stream stopped arriving"));
                 } else {
                     log::warn!("stream stalled, connecting again");
@@ -555,14 +649,48 @@ impl Shared {
                 other => Err(Failure::http(other)),
             };
         }
+        // A sign-in page met on a later request, once a gateway's session has
+        // run out, ends the song as it would have at the start.
+        let html = is_html(response.headers().get("content-type").and_then(|v| v.to_str().ok()));
+        let login = sends_login(&self.url, &self.opts);
+        if self.opts.by_time && !html && !matches!(status, 401 | 403) {
+            // A stream made on the way that its server now refuses, or sends
+            // as another file, cannot go on by bytes.
+            if !matches!(status, 200 | 206 | 416) {
+                return Err(Failure::reopen_at_time(format!("server answered {status}")));
+            }
+            let answered =
+                response.headers().get("content-type").and_then(|v| v.to_str().ok()).map(plain_type);
+            let first = self.content_type.as_deref().map(plain_type);
+            if answered.is_some() && first.is_some() && answered != first {
+                return Err(Failure::reopen_at_time("the stream changed"));
+            }
+        }
+        if !self.opts.by_time && status == 503 && offset > 0 {
+            // A later part of a song refused as busy: the server let go of the
+            // file the song was read from (Octo does, when a kept copy is
+            // gone). Asking on for its bytes would mix two files, so the deck
+            // opens the song again from its first byte.
+            return Err(Failure::reopen_at_time("server answered 503 for a later part"));
+        }
         match status {
+            200 | 206 if html => Err(Failure::sign_in_page(status)),
+            401 | 403 if refusal_is_sign_in_page(status, response.headers(), login) => {
+                Err(Failure::sign_in_page(status))
+            }
             206 => {
-                let start = response
-                    .headers()
-                    .get("content-range")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(range_start)
-                    .unwrap_or(offset);
+                let range = response.headers().get("content-range").and_then(|v| v.to_str().ok());
+                // A part of a file of another whole length is another file (the
+                // server began sending another version of the song): reading on
+                // would join the bytes of two files.
+                if let (Some(first), Some(total)) = (self.len, range.and_then(range_total))
+                    && total != first
+                {
+                    let message =
+                        format!("the server sent a part of another file ({total} bytes, not {first})");
+                    return Err(Failure::new(ErrorKind::FileChanged, message));
+                }
+                let start = range.and_then(range_start).unwrap_or(offset);
                 if start > offset {
                     return Err(Failure::new(ErrorKind::Network, "server sent the wrong range"));
                 }
@@ -637,7 +765,7 @@ fn fetch(shared: Arc<Shared>, generation: u64, mut offset: u64, mut body: Option
                     shared.finish(generation);
                     return;
                 }
-                Err(failure) if failure.status.is_some_and(|s| (400..500).contains(&s)) => {
+                Err(failure) if is_final(&failure) => {
                     shared.fail(generation, failure);
                     return;
                 }
@@ -697,6 +825,11 @@ fn fetch(shared: Arc<Shared>, generation: u64, mut offset: u64, mut body: Option
                         return;
                     }
                     break;
+                }
+                Err(e) if shared.opts.by_time => {
+                    log::warn!("a stream made on the way broke off at {offset}: {e}");
+                    shared.fail(generation, Failure::reopen_at_time("the stream broke off"));
+                    return;
                 }
                 Err(e) => {
                     let ranges = shared.lock().ranges;
@@ -768,22 +901,202 @@ fn backoff(shared: &Shared, generation: u64, failures: u32) -> bool {
     true
 }
 
-fn request(url: &str, opts: &HttpOptions, from: u64) -> Result<ureq::http::Response<ureq::Body>, Failure> {
-    let mut req = opts.agent.get(url);
-    for (name, value) in &opts.headers {
-        req = req.header(name, value);
-    }
-    req = if opts.live {
+// Asks for the stream from byte `from`, at the stream's own address each
+// time: an address a redirect gave before is never asked straight away.
+fn request(url: &str, opts: &HttpOptions, from: u64) -> Result<Answer, Failure> {
+    let extra = if opts.live {
         // A live stream has no ranges; its server may send titles.
-        req.header("Icy-MetaData", "1")
+        ("Icy-MetaData", "1".to_string())
     } else {
         // Always ask for a range: a server that supports them says so with 206.
-        req.header("Range", format!("bytes={from}-"))
+        ("Range", format!("bytes={from}-"))
     };
-    req.call().map_err(|e| match e {
-        ureq::Error::StatusCode(status) => Failure::http(status),
-        other => Failure::new(ErrorKind::Network, other.to_string()),
-    })
+    follow(&opts.agent, url, &opts.headers, &opts.secure_headers, &[extra], None)
+        .map(|(response, _)| response)
+}
+
+// Redirects followed in a row before the answer counts as a refusal.
+const MOST_REDIRECTS: u32 = 10;
+
+/// Asks for `url`, following redirects here rather than in the client, at
+/// most MOST_REDIRECTS in a row. `headers` go only to hops on the server of
+/// `url` itself (see `same_server`), never to another one a redirect names;
+/// `secure` go on top of them, but only to those hops that are https;
+/// `extra`, such as the range, goes on every hop. `limit` bounds each hop.
+/// Gives the first answer that is not a redirect, and the address that
+/// gave it.
+pub(crate) fn follow(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &[(String, String)],
+    secure: &[(String, String)],
+    extra: &[(&str, String)],
+    limit: Option<Duration>,
+) -> Result<(Answer, String), Failure> {
+    let home = origin(url);
+    let mut at = url.to_string();
+    let mut hops = 0;
+    loop {
+        let mut req = agent.get(at.as_str());
+        let own = home.as_ref().zip(origin(&at)).filter(|(home, to)| same_server(home, to));
+        if let Some((_, to)) = own {
+            for (name, value) in headers {
+                req = req.header(name, value);
+            }
+            // Never over plain http, the address asked for included.
+            if to.0 == "https" {
+                for (name, value) in secure {
+                    req = req.header(name, value);
+                }
+            }
+        }
+        for (name, value) in extra {
+            req = req.header(*name, value);
+        }
+        let called = match limit {
+            Some(limit) => req.config().timeout_global(Some(limit)).build().call(),
+            None => req.call(),
+        };
+        let response = called.map_err(|e| match e {
+            ureq::Error::StatusCode(status) => Failure::http(status),
+            other => Failure::new(ErrorKind::Network, other.to_string()),
+        })?;
+        if !response.status().is_redirection() {
+            return Ok((response, at));
+        }
+        if hops == MOST_REDIRECTS {
+            let status = response.status().as_u16();
+            return Err(refused_redirect(status, "after too many redirects in a row"));
+        }
+        at = redirect_target(&at, &response)?;
+        hops += 1;
+    }
+}
+
+// Where a redirect from `from` sends the stream on to, read against `from`
+// when it is relative. Only an http or https address is followed.
+fn redirect_target(from: &str, response: &Answer) -> Result<String, Failure> {
+    let status = response.status().as_u16();
+    let location = response.headers().get("location").and_then(|v| v.to_str().ok()).map(str::trim);
+    let Some(location) = location.filter(|l| !l.is_empty()) else {
+        return Err(refused_redirect(status, "without saying where to"));
+    };
+    let to = hls::resolve(from, location);
+    if !super::is_remote(&to) {
+        return Err(refused_redirect(status, "sending the stream away from http"));
+    }
+    Ok(to)
+}
+
+// A redirect that is not followed: the server's answer, and why.
+fn refused_redirect(status: u16, why: &str) -> Failure {
+    let message = format!("server answered {status} {why}");
+    Failure { kind: ErrorKind::Http, message, status: Some(status), reopen: false }
+}
+
+// An address's scheme, host and port, as `origin` gives them.
+type Origin = (String, String, u16);
+
+// The scheme, host and port of an address, by which a hop is the same
+// server or another; the port filled in where the scheme implies it.
+fn origin(url: &str) -> Option<Origin> {
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    let scheme = uri.scheme_str()?.to_ascii_lowercase();
+    let implied = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let host = uri.host()?.to_ascii_lowercase();
+    Some((scheme, host, uri.port_u16().unwrap_or(implied)))
+}
+
+// Whether a hop at `to` is still the server at `home`: the same origin, or
+// the same host moved up from http to https at https's own port 443, the
+// one address the apps add for an http server too.
+fn same_server(home: &Origin, to: &Origin) -> bool {
+    let ((scheme, host, _), (to_scheme, to_host, to_port)) = (home, to);
+    let upgraded = scheme == "http" && to_scheme == "https" && *to_port == 443;
+    home == to || (upgraded && host == to_host)
+}
+
+// Whether a content type is a web page, whatever its case and parameters
+// ("text/html; charset=utf-8" is one).
+fn is_html(content_type: Option<&str>) -> bool {
+    let bare = content_type.and_then(|t| t.split(';').next()).map(str::trim);
+    bare.is_some_and(|t| t.eq_ignore_ascii_case("text/html"))
+}
+
+// Whether a content type is JSON ("application/json", "text/json", or any
+// "+json" type).
+fn is_json(content_type: Option<&str>) -> bool {
+    let bare = content_type.and_then(|t| t.split(';').next()).map(|t| t.trim().to_ascii_lowercase());
+    bare.is_some_and(|t| t == "application/json" || t == "text/json" || t.ends_with("+json"))
+}
+
+// The values a header has, trimmed, leaving out any that are not text.
+fn header_values<'a>(headers: &'a ureq::http::HeaderMap, name: &str) -> impl Iterator<Item = &'a str> {
+    headers.get_all(name).iter().filter_map(|v| v.to_str().ok()).map(str::trim)
+}
+
+// Whether a 401 or 403 is a gateway refusing in the server's place, by what
+// only gateways send: a web page, a Basic challenge, Cloudflare Access's own
+// headers, an address to sign in at, a gateway's session cookie, or, to a
+// request that carried a sign-in, anything at all. A JSON answer is the
+// server's own, whatever else it carries.
+fn refusal_is_sign_in_page(status: u16, headers: &ureq::http::HeaderMap, login_sent: bool) -> bool {
+    let media = header_values(headers, "content-type").next();
+    if is_json(media) {
+        return false;
+    }
+    let challenge = |c: &str| c.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("basic"));
+    let basic = status == 401 && header_values(headers, "www-authenticate").any(challenge);
+    let access = headers.contains_key("cf-access-aud") || headers.contains_key("cf-access-domain");
+    let sent_on = header_values(headers, "location").any(sign_in_address);
+    let mut cookies = header_values(headers, "set-cookie").filter_map(|c| c.split('=').next());
+    let cookie = cookies.any(|name| is_gateway_cookie(name.trim()));
+    is_html(media) || basic || access || sent_on || cookie || login_sent
+}
+
+// Whether a Location sends the request on to a gateway's sign-in: one that
+// comes back after it (`rd` and `rm` in the query), an Authentik outpost,
+// or Cloudflare Access.
+fn sign_in_address(location: &str) -> bool {
+    let Ok(uri) = location.parse::<ureq::http::Uri>() else { return false };
+    let query = uri.query().unwrap_or_default();
+    let names: Vec<&str> = query.split('&').filter_map(|pair| pair.split('=').next()).collect();
+    let back = names.contains(&"rd") && names.contains(&"rm");
+    let path = uri.path();
+    let outpost = path.contains("/outpost.goauthentik.io/") || path.contains("/cdn-cgi/access/");
+    let access = uri.host().is_some_and(|h| h.to_ascii_lowercase().ends_with(".cloudflareaccess.com"));
+    back || outpost || access
+}
+
+// Whether a cookie's name is one a gateway keeps its session in.
+fn is_gateway_cookie(name: &str) -> bool {
+    name.starts_with("authentik_proxy") || name == "CF_Authorization" || name == "authelia_session"
+}
+
+// Whether the first request for `url` carries a sign-in: a header, among
+// those `follow` sends there, with a name gateways read one from.
+fn sends_login(url: &str, opts: &HttpOptions) -> bool {
+    const LOGIN: [&str; 3] = ["Authorization", "CF-Access-Client-Id", "CF-Access-Client-Secret"];
+    let secure = origin(url).is_some_and(|(scheme, _, _)| scheme == "https");
+    let mut sent = opts.headers.iter().chain(opts.secure_headers.iter().filter(|_| secure));
+    sent.any(|(name, _)| LOGIN.iter().any(|login| name.eq_ignore_ascii_case(login)))
+}
+
+// A failure that asking again would only repeat: the server said no, a
+// sign-in page answered in its place, or it sends another file now.
+fn is_final(failure: &Failure) -> bool {
+    failure.reopen
+        || matches!(failure.kind, ErrorKind::SignInPage | ErrorKind::FileChanged)
+        || failure.status.is_some_and(|s| (400..500).contains(&s))
+}
+
+// A content type without its parameters, in lowercase.
+fn plain_type(content_type: &str) -> String {
+    content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
 }
 
 // How many audio bytes a live server puts between its in-stream titles.

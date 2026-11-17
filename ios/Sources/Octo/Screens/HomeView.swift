@@ -11,23 +11,32 @@ struct HomeView: View {
     @Environment(Library.self) private var library
     @Environment(Discovery.self) private var discovery
     @Environment(ServerSync.self) private var serverSync
+    @Environment(DeviceLibrary.self) private var device
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.refreshLibrary) private var refreshLibrary
     @State private var model = HomeModel()
     @State private var settings = AppSettings.shared
     @State private var liveRadio = LiveRadioStore.shared
     @State private var reading = false
+    /// Whether to offer a notice for how a copy ends.
+    @State private var noticeAsk = false
+    /// The done card shown, put away once Home is left.
+    @State private var shownDone: Int?
 
     var body: some View {
         let layout = model.layout
+        let copy = copyCard
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ScreenTitle("Home")
                 if layout.askAccess { accessCard }
                 ResumeCard()
                 if model.whatsNewDue { whatsNewCard }
+                if let copy { copySlot(copy) }
                 if layout.empty {
-                    emptyCard(offerAccess: !layout.askAccess)
+                    // Until whether the server's music is on its way is read, neither its card
+                    // nor this note shows.
+                    if copy == nil, serverSync.awaiting != nil { emptyCard(offerAccess: !layout.askAccess) }
                     // An empty library is where the charts help most: songs to start from.
                     songShelf("Charts", model.charts, destination: .charts)
                 } else if layout.shelves {
@@ -40,6 +49,7 @@ struct HomeView: View {
             }
             .animation(.easeInOut(duration: 0.25), value: model.whatsNewDue)
             .animation(.easeInOut(duration: 0.25), value: layout)
+            .animation(.easeInOut(duration: 0.25), value: copy.map(slotKind))
             .animation(.easeInOut(duration: 0.3), value: settings.homeSections)
         }
         .barClearance()
@@ -67,9 +77,14 @@ struct HomeView: View {
         // A server shelf shown again, or the empty card's chart, is asked for then.
         .onChange(of: settings.homeSections) { _, _ in model.sectionsChanged() }
         .onChange(of: model.songCount == 0) { _, _ in model.sectionsChanged() }
-        .onChange(of: scenePhase) { _, phase in if phase == .active { model.shown() } }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.shown() }
+            if phase == .background { leftHome() }
+        }
         // Home is in front again after another tab or the full player.
         .background { WakeWatch { model.shown() } }
+        .onDisappear { leftHome() }
+        .task { noticeAsk = await CopyNoticeAsk.due() }
         .whatsNewPanel(isPresented: $reading) { model.dismissWhatsNew() }
     }
 
@@ -234,7 +249,7 @@ struct HomeView: View {
     /// good; the empty Library pages still offer access.
     private var accessCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Music on this phone").font(.octoBodySmall).foregroundStyle(.white)
+            Text("Music on this phone").font(.octoBodySmall).foregroundStyle(OctoColor.textPrimary)
             Text("Allow access to play the music already on your phone here too.")
                 .font(.octoCaption)
                 .foregroundStyle(OctoColor.textSecondary)
@@ -246,7 +261,7 @@ struct HomeView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(Glass.octo, in: .rect(cornerRadius: 20))
+        .octoGlass(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .padding(.horizontal, 20)
         .padding(.bottom, 12)
     }
@@ -255,7 +270,7 @@ struct HomeView: View {
     private var whatsNewCard: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("New in Octo").font(.octoCaption).foregroundStyle(OctoColor.textMuted)
-            Text(WhatsNew.summary).font(.octoBody).foregroundStyle(.white).lineLimit(2)
+            Text(WhatsNew.summary).font(.octoBody).foregroundStyle(OctoColor.textPrimary).lineLimit(2)
             HStack(spacing: 12) {
                 GlazeButton("See what's new") { reading = true }
                 GlazeButton("Dismiss") { model.dismissWhatsNew() }
@@ -264,10 +279,62 @@ struct HomeView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(Glass.octo, in: .rect(cornerRadius: 20))
+        .octoGlass(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .padding(.horizontal, 20)
         .padding(.bottom, 8)
         .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    // MARK: The copy
+
+    /// The card in Home's copy slot, for the account in use.
+    private var copyCard: HomeCopyCard? {
+        homeCopyCard(awaiting: serverSync.awaiting, phoneMusic: device.songCount > 0, run: serverSync.copyRun,
+                     outcome: serverSync.copyOutcome, account: serverSync.account?.id, server: session.active?.name ?? "")
+    }
+
+    /// Home's one copy slot: the hero, banner, done card and failed card take turns in it.
+    @ViewBuilder
+    private func copySlot(_ card: HomeCopyCard) -> some View {
+        Group {
+            switch card {
+            case let .coming(run, server, big):
+                if big {
+                    CopyHero(run: run, server: server, onAsk: noticeAsk ? {
+                        Task {
+                            await CopyNoticeAsk.ask()
+                            noticeAsk = false
+                        }
+                    } : nil)
+                } else {
+                    CopyBanner(run: run, server: server)
+                }
+            case let .here(token, songs, albums, server, settling, problem):
+                CopyDone(songs: songs, albums: albums, server: server, settling: settling, stepsProblem: problem) {
+                    serverSync.dismissCopy(token)
+                }
+                .onAppear { shownDone = token }
+            case let .stopped(reason, step, done, big):
+                CopyFailed(reason: reason, step: step, done: done, server: session.active?.name ?? "", big: big) { serverSync.tryAgain() }
+            }
+        }
+        .transition(.opacity)
+    }
+
+    /// Cards of one kind change in place; another kind fades in.
+    private func slotKind(_ card: HomeCopyCard) -> String {
+        switch card {
+        case let .coming(_, _, big): big ? "hero" : "banner"
+        case .here: "done"
+        case let .stopped(_, _, _, big): big ? "stopped" : "stopped-banner"
+        }
+    }
+
+    /// Home was left: the done card it showed goes.
+    private func leftHome() {
+        guard let token = shownDone else { return }
+        shownDone = nil
+        serverSync.dismissCopy(token)
     }
 
     /// A library with no songs at all, from anywhere. `offerAccess` is off while the access card
@@ -276,7 +343,7 @@ struct HomeView: View {
         let askAccess = offerAccess && model.access != .granted
         let signIn = session.client == nil
         return VStack(alignment: .leading, spacing: 6) {
-            Text("No music yet").font(.octoHeadline).foregroundStyle(.white)
+            Text("No music yet").font(.octoHeadline).foregroundStyle(OctoColor.textPrimary)
             Text("Songs on this phone and on your server show up here on their own.")
                 .font(.octoBodySmall)
                 .foregroundStyle(OctoColor.textMuted)
@@ -305,7 +372,7 @@ struct HomeShelfTitle: View {
                 HStack(spacing: 0) {
                     Text(title)
                         .font(.octoSection)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(OctoColor.textPrimary)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 10)
                     Image(systemName: "chevron.right")
@@ -342,7 +409,7 @@ private struct PinnedCard<Picture: View>: View {
                 Spacer().frame(height: 8)
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(OctoColor.textPrimary)
                     .lineLimit(1)
                 Text(subtitle).font(.octoCaption).foregroundStyle(OctoColor.textMuted).lineLimit(1)
             }

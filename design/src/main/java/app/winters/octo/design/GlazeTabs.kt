@@ -83,18 +83,20 @@ fun GlazeTabs(
     // Where each tab starts and how wide it is, when tabs differ in width.
     var starts by remember { mutableStateOf(emptyList<Float>()) }
     var widths by remember { mutableStateOf(emptyList<Float>()) }
+    val pillColor = OctoColors.Accent
+    val gearColor = OctoColors.GlassAccent
 
     Glaze(
         modifier
             .height(height)
-            .dropShadow(CircleShape, Shadow(radius = shadowBlur(10f), color = Color.Black.copy(alpha = 0.20f), offset = DpOffset(0.dp, 2.dp))),
+            .dropShadow(CircleShape, Shadow(radius = shadowBlur(10f), color = shadowColor(0.20f), offset = DpOffset(0.dp, 2.dp))),
     ) {
         // Recessed: a shade falling from the top inside edge, and a hairline
         // of accent round the rim.
         Box(
             Modifier
                 .matchParentSize()
-                .innerShadow(CircleShape, Shadow(radius = shadowBlur(2f), spread = 1.6.dp, color = Color.Black.copy(alpha = 0.15f), offset = DpOffset(0.dp, 3.dp)))
+                .innerShadow(CircleShape, Shadow(radius = shadowBlur(2f), spread = 1.6.dp, color = shadowColor(0.15f), offset = DpOffset(0.dp, 3.dp)))
                 .innerShadow(CircleShape, Shadow(radius = 0.dp, spread = 0.5.dp, color = OctoColors.GlassAccent.copy(alpha = 0.25f))),
         )
         Layout(
@@ -131,23 +133,23 @@ fun GlazeTabs(
                         val part = (at - from).coerceIn(0f, 1f)
                         val left = starts[from] + (starts[to] - starts[from]) * part
                         val wide = widths[from] + (widths[to] - widths[from]) * part
-                        drawRoundRect(OctoColors.Accent, Offset(left, 0f), Size(wide, size.height), corner)
+                        drawRoundRect(pillColor, Offset(left, 0f), Size(wide, size.height), corner)
                         for (index in 0 until count) {
                             val tint = if (pill.isRunning) gearShiftTint(index, at, selected) else 0f
                             if (tint > 0f) {
-                                drawRoundRect(OctoColors.GlassAccent.copy(alpha = tint), Offset(starts[index], 0f), Size(widths[index], size.height), corner)
+                                drawRoundRect(gearColor.copy(alpha = tint), Offset(starts[index], 0f), Size(widths[index], size.height), corner)
                             }
                         }
                         return@drawBehind
                     }
                     if (cell <= 0f) return@drawBehind
                     val left = at * cell
-                    drawRoundRect(OctoColors.Accent, Offset(left, 0f), Size(cell, size.height), corner)
+                    drawRoundRect(pillColor, Offset(left, 0f), Size(cell, size.height), corner)
                     // Gears going by.
                     for (index in 0 until count) {
                         val tint = if (pill.isRunning) gearShiftTint(index, at, selected) else 0f
                         if (tint > 0f) {
-                            drawRoundRect(OctoColors.GlassAccent.copy(alpha = tint), Offset(index * cell, 0f), Size(cell, size.height), corner)
+                            drawRoundRect(gearColor.copy(alpha = tint), Offset(index * cell, 0f), Size(cell, size.height), corner)
                         }
                     }
                 },

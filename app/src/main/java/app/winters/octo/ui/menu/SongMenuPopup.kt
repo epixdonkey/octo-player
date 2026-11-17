@@ -23,7 +23,6 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -33,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation3.runtime.NavKey
+import app.winters.octo.catalog.FIND_PREFIX
 import app.winters.octo.catalog.TrackEntity
 import app.winters.octo.catalog.isFind
 import app.winters.octo.design.GlassPopup
@@ -46,6 +46,7 @@ import app.winters.octo.offline.Reasons
 import app.winters.octo.offline.reasons
 import app.winters.octo.output.OutputChoice
 import app.winters.octo.ui.common.Artwork
+import app.winters.octo.ui.common.LocalOwnedFinds
 import app.winters.octo.ui.common.GlassMenuAction
 import app.winters.octo.ui.common.GlassMenuBack
 import app.winters.octo.ui.common.GlassMenuGroups
@@ -62,10 +63,15 @@ import app.winters.octo.ui.output.OutputList
 import app.winters.octo.ui.output.OutputsViewModel
 import app.winters.octo.ui.playlist.PlaylistPickerPage
 import app.winters.octo.ui.playlist.PlaylistSheetsViewModel
+import app.winters.octo.ui.playlist.refusesFinds
+import app.winters.octo.ui.playlist.takesSongs
 import app.winters.octo.ui.server.ShareLinkPage
 import app.winters.octo.ui.server.ShareRequest
+import app.winters.octo.player.StreamVersionsHost
 import app.winters.octo.ui.upgrade.FIND_HIGHER_QUALITY
 import app.winters.octo.ui.upgrade.UpgradeAsk
+import app.winters.octo.versions.StreamVersionWords
+import app.winters.octo.versions.VersionsSong
 import dev.chrisbanes.haze.HazeState
 
 // The song menu, a glass card that floats beside the row held or the button
@@ -137,6 +143,8 @@ fun SongMenuHost(
         }
     }
     CollectionMenuHost(state.collections, onOpen, backdrop)
+    // Try another version's sheet, over the player like Choose lyrics.
+    StreamVersionsHost(state, backdrop)
 }
 
 // The song at the top, then its actions in their groups.
@@ -154,22 +162,23 @@ private fun SongActionsPage(
     // The playlist added to last, while it is still there.
     val playlists by sheets.playlists.collectAsStateWithLifecycle()
     val recent by sheets.recentIds.collectAsStateWithLifecycle()
-    // A family playlist the listener may only listen to is never the quick add.
-    val last = recent.firstOrNull()?.let { id -> playlists.firstOrNull { it.id == id && (!it.family || it.familyMayAdd) } }
+    // A playlist the listener may only listen to, or for a song found online
+    // an upkeep list that refuses it, is never the quick add.
+    val find = isFind(trackId)
+    val last = recent.firstOrNull()?.let { id -> playlists.firstOrNull { it.id == id && it.takesSongs && !(find && it.refusesFinds) } }
     val context = state.lastContext
-    val liked by vm.liked.collectAsStateWithLifecycle()
+    val isLiked by remember(trackId) { vm.liked(trackId) }.collectAsStateWithLifecycle(false)
     val downloads by vm.downloadStates.collectAsStateWithLifecycle()
-    val kept by vm.kept.collectAsStateWithLifecycle()
+    val keptRow by remember(trackId) { vm.kept(trackId) }.collectAsStateWithLifecycle(null)
     val radio by vm.radio.collectAsStateWithLifecycle()
     val canUpgrade by vm.canUpgrade.collectAsStateWithLifecycle()
     val canFindSongs by vm.canFindSongs.collectAsStateWithLifecycle()
+    val offersVersions by vm.streamVersions.collectAsStateWithLifecycle()
     val upgradable by produceState(emptyList<UpgradeAsk>(), trackId, canUpgrade) { value = if (canUpgrade) vm.upgradable(trackId) else emptyList() }
     val canRemove by vm.canRemove.collectAsStateWithLifecycle()
     val onDisk by produceState(false, trackId, canRemove) { value = canRemove && vm.deletable(trackId) }
     val removesFromMine = vm.family.removesFromMine
     val inMine by produceState(false, trackId, removesFromMine) { value = removesFromMine && vm.removableFromMine(trackId) }
-    val isLiked = trackId in liked
-    val keptRow = kept[trackId]
     val byHand = keptRow?.reasons?.contains(Reasons.MANUAL) == true
     val place = menuPlace(context, song.albumId, song.artistId)
     val phone = song.onPhone && !isFind(trackId)
@@ -186,6 +195,9 @@ private fun SongActionsPage(
         disk = onDisk,
         requestCopy = vm.family.outside.offersRequest,
         removeFromMine = inMine,
+        owned = trackId in LocalOwnedFinds.current,
+        streamVersions = offersVersions && vm.playingEntry(trackId) != null,
+        playlistAdds = vm.playlistAdds,
     )
     // A family member whose songs are saved rather than added.
     val saves = vm.family.outside.addLabel != null
@@ -313,6 +325,12 @@ private fun SongActionsPage(
                     state.close()
                     vm.findSongs(trackId, song.title)
                 })
+                SongAction.TryAnotherVersion -> GlassMenuAction(OctoIcons.LeftRight, StreamVersionWords.MENU_ROW, opensPage = true, onClick = {
+                    state.close()
+                    vm.playingEntry(trackId)?.let { entry ->
+                        state.openVersions(VersionsSong(entry, trackId.removePrefix(FIND_PREFIX), song.title, song.artist))
+                    }
+                })
                 SongAction.Cast -> CastAction(onClick = { state.pages.open(SongPage.Cast) })
                 SongAction.Sound -> {
                     val equalizerOn by vm.equalizerOn.collectAsStateWithLifecycle()
@@ -389,7 +407,7 @@ private fun RatePage(song: TrackEntity, vm: SongMenuViewModel, onBack: () -> Uni
                     Icon(
                         painterResource(if (lit) OctoIcons.StarFilled else OctoIcons.Star),
                         contentDescription = null,
-                        tint = if (lit) Color.White else OctoColors.TextMuted,
+                        tint = if (lit) OctoColors.Highlight else OctoColors.TextMuted,
                         modifier = Modifier.size(30.dp),
                     )
                 }

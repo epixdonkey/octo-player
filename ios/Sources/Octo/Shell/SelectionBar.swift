@@ -170,6 +170,8 @@ private struct SelectionBar: View {
         let picked = target.picked()
         let songs = picked.map(\.song)
         let library = songs.filter { !$0.isExternal }
+        // What Add to playlist takes: songs found online too, on a server that keeps them.
+        let addable = playlistAddable(songs, isFind: \.isExternal, findsGoIn: session.client != nil && findsGoInPlaylists(session.extensions))
         let allLiked = !library.isEmpty && library.allSatisfy { actions.isLiked?($0) ?? $0.isStarred }
         let canDownload = actions.download != nil && library.contains { !actions.onPhone($0) }
         let allOnPhone = !picked.isEmpty && songs.allSatisfy { !$0.isExternal && actions.onPhone($0) }
@@ -180,7 +182,7 @@ private struct SelectionBar: View {
                     .frame(width: 44)
                 Text(selectedWords(picked.count))
                     .font(.octoBodySmall)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(OctoColor.textPrimary)
                     .padding(.leading, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityAddTraits(.updatesFrequently)
@@ -199,7 +201,7 @@ private struct SelectionBar: View {
                             }
                         }
                     } label: {
-                        IconView(.delete, size: 22, color: .white)
+                        IconView(.delete, size: 22, color: OctoColor.textPrimary)
                             .frame(maxWidth: .infinity, minHeight: 44)
                             .contentShape(Rectangle())
                     }
@@ -218,8 +220,8 @@ private struct SelectionBar: View {
                 BarButton(icon: .play, label: "Play") { act { player.play(songs, from: 0) } }
                 BarButton(icon: .playNext, label: "Play next") { act { putInQueue(songs, next: true) } }
                 BarButton(icon: .addToQueue, label: "Add to queue") { act { putInQueue(songs, next: false) } }
-                BarButton(icon: .addToPlaylist, label: "Add to playlist", enabled: !library.isEmpty && actions.addToPlaylist != nil) {
-                    act { actions.addToPlaylist?(library) }
+                BarButton(icon: .addToPlaylist, label: "Add to playlist", enabled: !addable.isEmpty && actions.addToPlaylist != nil) {
+                    act { actions.addToPlaylist?(addable) }
                 }
                 BarButton(icon: .download, label: "Download", enabled: canDownload) {
                     act { actions.download?(library.filter { !actions.onPhone($0) }) }
@@ -289,7 +291,8 @@ private struct BarButton: View {
 
     var body: some View {
         Button(action: action) {
-            IconView(icon, size: 22, color: enabled ? .white : OctoColor.textMuted.opacity(0.35))
+            IconView(icon, size: 22,
+                     color: enabled ? AnyShapeStyle(OctoColor.textPrimary) : AnyShapeStyle(OctoColor.textMuted.opacity(0.35)))
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
         }
@@ -303,7 +306,7 @@ private struct BarButton: View {
 private struct RectPress: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(Color.white.opacity(configuration.isPressed ? 0.10 : 0))
+            .background(OctoColor.textPrimary.opacity(configuration.isPressed ? 0.10 : 0))
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }

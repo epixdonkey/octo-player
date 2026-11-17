@@ -1,4 +1,7 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.security.MessageDigest
+import java.security.cert.CertificateFactory
+import java.util.Properties
 
 // The desktop app for Windows, macOS and Linux: a client of any Subsonic,
 // Navidrome or Octo server, on the shared core and the desktop design.
@@ -9,7 +12,23 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-kotlin { jvmToolchain(17) }
+// Java 25 (LTS): the runtime the installers bundle and the one the app's
+// tests run on. The shared modules it builds on are built with 25 too but
+// keep Java 17 classes, which the Android app needs.
+val appJavaVersion = 25
+kotlin { jvmToolchain(appJavaVersion) }
+
+// jlink and jpackage cut the installers' runtime from this JDK. The Compose
+// plugin takes the JDK Gradle itself runs on unless told otherwise, which
+// would pack a Java 17 runtime around classes made for 25 (and fail at the
+// first start).
+val appJdk = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(appJavaVersion) }
+// After the plugin's own afterEvaluate, which sets it for every task.
+afterEvaluate {
+    tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJvmToolOperationTask>().configureEach {
+        javaHome.set(appJdk.map { it.metadata.installationPath.asFile.absolutePath })
+    }
+}
 
 // The version the installers carry and the app shows. Windows only
 // replaces an installed Octo with a higher version, so every build handed
@@ -109,12 +128,17 @@ val engineLibrary = when {
 }
 val prebuiltEngine = providers.gradleProperty("octo.audioLib")
 
+// The helper that keeps NVIDIA's game overlay off Octo, run as an
+// administrator from Settings (audio-engine/src/bin/octo-nvidia.rs).
+val nvidiaHelper = if (hostOs.startsWith("windows")) "octo-nvidia.exe" else "octo-nvidia"
+
 val buildAudioEngine = tasks.register<Exec>("buildAudioEngine") {
-    description = "Builds the Rust audio engine for this machine."
+    description = "Builds the Rust audio engine for this machine, and its NVIDIA helper."
     workingDir = engineDir
-    commandLine("cargo", "build", "--release", "--lib")
+    commandLine("cargo", "build", "--release", "--lib", "--bin", "octo-nvidia")
     inputs.files(fileTree(engineDir) { include("src/**", "Cargo.toml", "Cargo.lock", "uniffi.toml") })
     outputs.file(File(engineDir, "target/release/$engineLibrary"))
+    outputs.file(File(engineDir, "target/release/$nvidiaHelper"))
 }
 
 val shareAudioEngine = tasks.register<Sync>("shareAudioEngine") {
@@ -143,6 +167,9 @@ val packsNatives = hostName.startsWith("windows")
 val shareAppNatives by tasks.registering(Sync::class) {
     if (packsNatives) {
         from(shareAudioEngine) { include("$jnaFolder/*") }
+        // Not with a prebuilt engine: that build has no helper, and Settings
+        // then leaves the NVIDIA row out.
+        if (!prebuiltEngine.isPresent) from(buildAudioEngine) { include(nvidiaHelper) }
         from(shareSystemShim) { include("$jnaFolder/*") }
         from(configurations.runtimeClasspath.map { jars -> jars.filter { it.name.startsWith("jna-") }.map { zipTree(it) } }) { include("com/sun/jna/$jnaFolder/*") }
         eachFile { path = "common/$name" }
@@ -203,6 +230,16 @@ dependencies {
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.mockwebserver)
+    testImplementation(libs.okhttp.tls)
+}
+
+// The client certificate tests open the files in fixtures/gateway/certs.
+// A fresh test JVM every 150 classes: the drawing tests' native memory grows
+// across the whole suite in one process (about 14 GB on Linux), more than a
+// 16 GB build machine has to spare.
+tasks.withType<Test>().configureEach {
+    inputs.dir(rootProject.file("fixtures/gateway/certs"))
+    forkEvery = 150
 }
 
 // The performance harness (OCTO_PERF=1, perf/LibraryPerfTest.kt) runs each
@@ -274,6 +311,10 @@ compose.desktop {
         // and on OpenGL kept growing. At 64 MB it stays near 1.27 GB on
         // either, at the same processor use (soaks of 2026-10-20).
         jvmArgs("-Dskiko.gpu.resourceCacheLimit=64m")
+        // JNA (the audio engine, the system library) loads its native
+        // library through System.load; Java 24 and later warn about that on
+        // every start and plan to block it unless the app says it may.
+        jvmArgs("--enable-native-access=ALL-UNNAMED")
         // `-Pocto.checkPlay=build/check/tone.wav` plays a made-up tone once
         // the window opens and prints what the engine says (audio/SoundCheck.kt).
         providers.gradleProperty("octo.checkPlay").orNull?.let { jvmArgs("-Docto.checkPlay=${file(it).absolutePath}") }
@@ -283,25 +324,9 @@ compose.desktop {
         // or -Pocto.discordAppId=... . Without one, Settings leaves Discord out.
         providers.gradleProperty("octo.discordAppId").orNull?.takeIf(String::isNotBlank)?.let { jvmArgs("-Docto.discordAppId=${it.trim()}") }
         nativeDistributions {
-            // MSI for Windows, DMG for macOS, DEB and RPM for Linux.
-            //
-            // An AppImage is one extra step on Linux, from the app image
-            // that createDistributable makes:
-            //   ./gradlew :desktop:createDistributable
-            //   mkdir -p Octo.AppDir/usr
-            //   cp -r desktop/build/compose/binaries/main/app/Octo/* Octo.AppDir/usr/
-            //   cp desktop/icons/octo.png Octo.AppDir/octo.png
-            //   ln -s usr/bin/Octo Octo.AppDir/AppRun
-            // then Octo.AppDir/octo-Octo.desktop (the name the media controls
-            // announce) with these lines:
-            //   [Desktop Entry]
-            //   Type=Application
-            //   Name=Octo
-            //   Exec=Octo %U
-            //   Icon=octo
-            //   Categories=AudioVideo;Audio;Player;
-            //   MimeType=audio/mpeg;audio/flac;audio/mp4;audio/ogg;audio/opus;audio/wav;x-scheme-handler/octo;
-            // and last: appimagetool Octo.AppDir Octo-1.0.0-x86_64.AppImage
+            // MSI for Windows, DMG for macOS, DEB and RPM for Linux. The
+            // Flatpak, AppImage and pacman package are made from the same
+            // app image by the tasks at the end of this file.
             targetFormats(TargetFormat.Msi, TargetFormat.Dmg, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "Octo"
             // Files beside the jars: the native libraries (shareAppNatives).
@@ -320,7 +345,13 @@ compose.desktop {
             // jdk.accessibility carries the Java Access Bridge, the only way
             // a screen reader on Windows (NVDA, JAWS) can read the app;
             // without it the installed Octo is a blank window to them.
-            modules("java.instrument", "jdk.security.auth", "jdk.unsupported", "jdk.crypto.ec", "java.naming", "java.xml", "jdk.accessibility")
+            // java.management lets the memory log read the JVM's memory
+            // outside the heap and its direct buffers.
+            modules("java.instrument", "jdk.security.auth", "jdk.unsupported", "jdk.crypto.ec", "java.naming", "java.xml", "jdk.accessibility", "java.management")
+            // Windows only: the Windows certificate store (Windows-ROOT), so
+            // a private authority installed there is trusted for the server
+            // (server/SystemTrust.kt). macOS's keychains are in java.base.
+            if (hostName.startsWith("windows")) modules("jdk.crypto.mscapi")
             windows {
                 iconFile = file("icons/octo.ico")
                 menuGroup = "Octo"
@@ -331,7 +362,7 @@ compose.desktop {
                 // %LOCALAPPDATA%\OctoPlayer, a folder of the program's own.
                 // Earlier builds went into %LOCALAPPDATA%\Octo, which holds
                 // the cache, and replacing one emptied that whole folder.
-                // Not %LOCALAPPDATA%\Programs\Octo: jpackage 17 lists only
+                // Not %LOCALAPPDATA%\Programs\Octo: jpackage lists only
                 // the install folder and those inside it for removal, and
                 // a per-user MSI fails its checks (ICE64) for the Programs
                 // folder above it. The app knows this folder as
@@ -347,6 +378,12 @@ compose.desktop {
                 iconFile = file("icons/octo.icns")
                 bundleID = "app.winters.octo"
                 appCategory = "public.app-category.music"
+                // What the app and its runtime may do under the hardened
+                // runtime a signed, notarized app runs with. Signing itself
+                // is switched on by the release workflow with Gradle
+                // properties (compose.desktop.mac.sign and its identity).
+                entitlementsFile.set(file("packaging/macos/entitlements.plist"))
+                runtimeEntitlementsFile.set(file("packaging/macos/entitlements.plist"))
                 // octo:// links open the app.
                 infoPlist {
                     extraKeysRawXml = """
@@ -434,6 +471,10 @@ val providerModules = mapOf(
     "SunPKCS11" to "jdk.crypto.cryptoki",
 )
 
+// Certificates the packaged runtime refuses wherever they appear in a
+// chain, its own roots included.
+val distrustedCertificates = layout.projectDirectory.file("security/distrusted-certificates.pem")
+
 // A class data sharing (CDS) archive in the packaged runtime: the Java
 // classes every start loads, parsed once here into a file the JVM maps at
 // start, as a full JDK ships one (jlink leaves it out of a trimmed runtime).
@@ -442,8 +483,21 @@ val providerModules = mapOf(
 // its launcher for the dump and takes it back. A JVM that cannot use the
 // archive starts without it, as before.
 tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJLinkTask>().configureEach {
+    inputs.file(distrustedCertificates)
     doLast {
         val runtime = destinationDir.get().asFile
+        // The JDK's own blocklist: one SHA-256 per certificate, in uppercase
+        // hex, which it never matches in lowercase.
+        val blockList = File(runtime, "lib/security/blocked.certs")
+        val refused = distrustedCertificates.asFile.inputStream().use { CertificateFactory.getInstance("X.509").generateCertificates(it) }
+            .map { cert -> MessageDigest.getInstance("SHA-256").digest(cert.encoded).joinToString("") { "%02X".format(it) } }
+        fun blocked() = Properties().apply { blockList.inputStream().use { load(it) } }
+        if (refused.isEmpty() || blocked().getProperty("Algorithm") != "SHA-256") throw GradleException("The runtime's blocked.certs is not a SHA-256 list, or there is nothing to add to it.")
+        val adding = refused.filterNot(blocked()::containsKey)
+        if (adding.isNotEmpty()) blockList.appendText(adding.joinToString("\n", prefix = "\n", postfix = "\n"))
+        val taken = blocked()
+        val missing = refused.filterNot { fingerprint -> taken.containsKey(fingerprint) }
+        if (missing.isNotEmpty()) throw GradleException("The runtime's blocked.certs did not take ${missing.joinToString()}.")
         // The security providers the runtime lists, cut to those it carries.
         // Asked for one that is missing, the JVM looks through every
         // provider on the class path instead, which starts the updater's
@@ -451,6 +505,16 @@ tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJLinkTask
         // every start, on the thread before the window (measured).
         val release = File(runtime, "release").readText()
         val modules = Regex("MODULES=\"([^\"]*)\"").find(release)?.groupValues?.get(1)?.split(' ')?.toSet().orEmpty()
+        // The memory log reads the JVM's own memory through java.management;
+        // tests run on a full JDK, so only this check sees it missing here.
+        if ("java.management" !in modules) {
+            throw GradleException("The runtime lacks java.management (MODULES: ${modules.ifEmpty { setOf("unreadable") }})")
+        }
+        // Without it the Windows certificate store can't be read, and a
+        // private authority installed there goes unseen (SystemTrust.kt).
+        if (hostName.startsWith("windows") && "jdk.crypto.mscapi" !in modules) {
+            throw GradleException("The runtime lacks jdk.crypto.mscapi (MODULES: ${modules.ifEmpty { setOf("unreadable") }})")
+        }
         val security = File(runtime, "conf/security/java.security")
         if (modules.isNotEmpty() && security.isFile) {
             val lines = security.readLines()
@@ -490,4 +554,65 @@ val packagePortableZip by tasks.registering(Zip::class) {
     from(file("portable/octo-portable")) { into(if (hostName.startsWith("windows")) "Octo/app" else "Octo/lib/app") }
     archiveFileName = "Octo-$desktopVersion-$jnaFolder.zip"
     destinationDirectory = layout.buildDirectory.dir("compose/binaries/main/zip")
+}
+
+// The app as a Flatpak bundle, from the same app image as the DEB and RPM:
+// build/compose/binaries/main/flatpak/Octo-<version>-linux-x64.flatpak.
+// Linux only, with flatpak-builder and Flathub's runtime; the tools and the
+// sandbox are in packaging/linux/flatpak/flatpak.py.
+val packageFlatpak by tasks.registering(Exec::class) {
+    group = "compose desktop"
+    description = "Packs the app into a Flatpak bundle (Linux x64, needs flatpak-builder)."
+    dependsOn("createDistributable")
+    val image = layout.buildDirectory.dir("compose/binaries/main/app/Octo")
+    val out = layout.buildDirectory.dir("compose/binaries/main/flatpak")
+    inputs.dir(file("packaging/linux/flatpak"))
+    outputs.dir(out)
+    doFirst {
+        if (!hostName.startsWith("linux") || hostArch != "x86-64") throw GradleException("The Flatpak is built on Linux x64.")
+        out.get().asFile.deleteRecursively()
+    }
+    commandLine(
+        "python3", file("packaging/linux/flatpak/flatpak.py").absolutePath, "bundle",
+        "--image", image.get().asFile.absolutePath, "--version", desktopVersion, "--out", out.get().asFile.absolutePath,
+    )
+}
+
+// The app as an AppImage and as an Arch Linux package, from the same app
+// image again: build/compose/binaries/main/appimage/Octo-<version>-linux-x64.AppImage
+// and build/compose/binaries/main/pacman/Octo-<version>-linux-x64.pkg.tar.zst.
+// Linux x64 only; packaging/linux/packages.py has the tools each needs.
+listOf("AppImage" to "appimage", "Pacman" to "pacman").forEach { (title, kind) ->
+    tasks.register<Exec>("package$title") {
+        group = "compose desktop"
+        description = "Packs the app into ${if (kind == "appimage") "an AppImage" else "an Arch Linux package"} (Linux x64)."
+        dependsOn("createDistributable")
+        val image = layout.buildDirectory.dir("compose/binaries/main/app/Octo")
+        val out = layout.buildDirectory.dir("compose/binaries/main/$kind")
+        inputs.dir(image)
+        inputs.files(file("packaging/linux/packages.py"), file("packaging/linux/flatpak/app.winters.octo.desktop"))
+        inputs.dir(file("packaging/linux/$kind"))
+        inputs.property("version", desktopVersion)
+        outputs.dir(out)
+        doFirst {
+            if (!hostName.startsWith("linux") || hostArch != "x86-64") throw GradleException("The $title is built on Linux x64.")
+            out.get().asFile.deleteRecursively()
+        }
+        commandLine(
+            "python3", file("packaging/linux/packages.py").absolutePath, kind,
+            "--image", image.get().asFile.absolutePath, "--version", desktopVersion, "--out", out.get().asFile.absolutePath,
+        )
+    }
+}
+
+// A release's disk image is only ever made signed (the release workflow
+// then notarizes it). A release build without compose.desktop.mac.sign=true
+// stops here, rather than make a DMG that Gatekeeper would turn away.
+val signsForMac = providers.gradleProperty("compose.desktop.mac.sign").orNull == "true"
+tasks.matching { it.name == "packageDmg" || it.name == "packageReleaseDmg" }.configureEach {
+    doFirst {
+        if (releaseVersion != null && !signsForMac) {
+            throw GradleException("A release DMG must be signed: pass -Pcompose.desktop.mac.sign=true with the signing identity, as desktop-installers.yml does.")
+        }
+    }
 }
