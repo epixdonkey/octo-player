@@ -399,7 +399,7 @@ jobs:
               if [ -n "$home" ]; then
                 adb shell input tap $home
                 sleep 2
-                await_text "Edit Home" 8 && return 0
+                await_text "Edit Home" 8 && { sleep 1; return 0; }
               elif [ "$backs" -lt 2 ]; then
                 adb shell input keyevent 4
                 backs=$((backs+1))
@@ -747,10 +747,14 @@ jobs:
             sleep 8
           }
           open_playlists() {
-            tap_text "Library" || { shot lib-library; echo "::error::The Library could not be tapped."; exit 1; }; sleep 2
+            tap_text "Library" || { shot lib-library; echo "::error::The Library could not be tapped."; exit 1; }
+            sleep 2
+            dump open-lib-1 >/dev/null
             await_text "Playlists" 10 scroll \
               || { shot open-playlists; echo "::error::The Library's Playlists entry never appeared."; exit 1; }
-            tap_text "Playlists" || { shot lib-playlists; echo "::error::The Playlists could not be tapped."; exit 1; }; sleep 2
+            tap_text "Playlists" || { shot lib-playlists; echo "::error::The Playlists could not be tapped."; exit 1; }
+            sleep 2
+            dump open-playlists-1 >/dev/null
           }
           LIB
 
@@ -1029,9 +1033,11 @@ jobs:
           tap_text "$W2_NAME" || { shot w2-open-row; echo "::error::The playlist row could not be tapped."; exit 1; }
           shot w2-added
           check W2 "the server playlist grew to three songs" "3" "$(await_count 3 playlist_entry_count "$W2_ID")"
-          # The picker leaves a page of its own on the stack (run
-          # 44101841939); walk home before asking for Library.
-          back_to_main || { shot w2-no-main; echo "::error::Could not get back to the main shell after the add."; exit 1; }
+          # No walk home here: the picker returns to the search screen with
+          # the bottom bar in place (run 44107088523's dump), and W1 proved
+          # open_playlists from exactly that state -- the extra Home hop of
+          # run 44101841939's fix only added a second animation to lose a
+          # tap in.
           open_playlists
           await_text "$W2_NAME" 15 scroll \
             || { shot w2-no-row; echo "::error::The picker never listed the existing playlist."; exit 1; }
