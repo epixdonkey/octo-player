@@ -643,7 +643,9 @@ jobs:
           }
           open_playlists() {
             tap_text "Library"; sleep 2
-            await_text "Playlists" 10 scroll && tap_text "Playlists" && sleep 2
+            await_text "Playlists" 10 scroll \
+              || { shot open-playlists; echo "::error::The Library's Playlists entry never appeared."; exit 1; }
+            tap_text "Playlists"; sleep 2
           }
           LIB
 
@@ -823,10 +825,13 @@ jobs:
           await_text "Add to playlist" 10 || { shot w1-menu; echo "::error::The found song's menu offers no Add to playlist."; exit 1; }
           check W1 "the found song's menu offers Add to playlist" "Add to playlist" "$(screen_texts w1-menu | grep -m1 "Add to playlist" || echo none)"
           tap_text "Add to playlist"; sleep 2
-          await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
+          await_text "New playlist" 10 scroll \
+            || { shot w1-no-new; echo "::error::The picker's New playlist never appeared."; exit 1; }
+          tap_text "New playlist"; sleep 2
           tap_edit 0
           type "Znalezione"
           adb shell input keyevent 111
+          adb shell input keyevent 61
           tap_text "Create"; sleep 3
           shot w1-created
 
@@ -852,14 +857,17 @@ jobs:
           source "$RUNNER_TEMP/brama-lib.sh"
           search_for Mozart
           open_menu_on_row "$F1_TITLE" || { shot w2-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
-          await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
+          await_text "Add to playlist" 10 || { shot w2-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
+          tap_text "Add to playlist"; sleep 2
           await_text "$W2_NAME" 15 scroll
           check W2 "the picker lists the existing library playlist" "$W2_NAME" "$(screen_texts w2-picker | grep -m1 "$W2_NAME" || echo none)"
           tap_text "$W2_NAME"
           shot w2-added
           check W2 "the server playlist grew to three songs" "3" "$(await_count 3 playlist_entry_count "$W2_ID")"
           open_playlists
-          await_text "$W2_NAME" 15 scroll && tap_text "$W2_NAME"; sleep 3
+          await_text "$W2_NAME" 15 scroll \
+            || { shot w2-no-row; echo "::error::The picker never listed the existing playlist."; exit 1; }
+          tap_text "$W2_NAME"; sleep 3
           await_text "$F1_TITLE" 15 scroll
           check W2 "the existing playlist renders the found song" "$F1_TITLE" "$(screen_texts w2-open | grep -F "$F1_TITLE" || echo none)"
           shot w2-playlist
@@ -887,10 +895,13 @@ jobs:
           await_text "Add to playlist" 10 || { shot w3-no-bar; echo "::error::The selection bar did not appear."; exit 1; }
           check W3 "the selection bar offers Add to playlist" "Add to playlist" "$(screen_texts w3-bar | grep -m1 "Add to playlist" || echo none)"
           tap_text "Add to playlist"; sleep 2
-          await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
+          await_text "New playlist" 10 scroll \
+            || { shot w3-no-new; echo "::error::The picker's New playlist never appeared."; exit 1; }
+          tap_text "New playlist"; sleep 2
           tap_edit 0
           type "${W3_NAME// /%s}"
           adb shell input keyevent 111
+          adb shell input keyevent 61
           tap_text "Create"
           shot w3-created
           PID="$(await_id "$W3_NAME")"
@@ -928,8 +939,12 @@ jobs:
           search_for Mozart
           await_text "Mozart Bridge One" 15 scroll
           tap_text "Mozart Bridge One"; sleep 4   # plays, so the player and its queue exist
-          open_menu_on_row "$F1_TITLE" && await_text "Play next" 10 && tap_text "Play next"; sleep 2
-          open_menu_on_row "$F2_TITLE" && await_text "Play next" 10 && tap_text "Play next"; sleep 2
+          open_menu_on_row "$F1_TITLE" || { shot w5-no-menu; echo "::error::No menu opened on the row."; exit 1; }
+          await_text "Play next" 10 || { shot w5-no-playnext; echo "::error::The menu offers no Play next."; exit 1; }
+          tap_text "Play next"; sleep 2
+          open_menu_on_row "$F2_TITLE" || { shot w5-no-menu; echo "::error::No menu opened on the row."; exit 1; }
+          await_text "Play next" 10 || { shot w5-no-playnext; echo "::error::The menu offers no Play next."; exit 1; }
+          tap_text "Play next"; sleep 2
           adb shell input keyevent 111   # the keyboard must not cover the player
           shot w5-before-player
 
@@ -938,11 +953,15 @@ jobs:
           await_text "Up next" 8 || tap_bottom
           tap_text "Up next"; sleep 2
           shot w5-queue
-          await_text "More" 10 && tap_text "More"; sleep 2
-          await_text "Save as playlist" 10 && tap_text "Save as playlist"; sleep 2
+          await_text "More" 10 || { shot w5-no-more; echo "::error::The queue sheet's More never appeared."; exit 1; }
+          tap_text "More"; sleep 2
+          await_text "Save as playlist" 10 \
+            || { shot w5-no-save; echo "::error::The More menu offers no Save as playlist."; exit 1; }
+          tap_text "Save as playlist"; sleep 2
           tap_edit 0
           type "$W5_NAME"
           adb shell input keyevent 111
+          adb shell input keyevent 61
           tap_text "Create"
           shot w5-saved
           PID="$(await_id "$W5_NAME")"
@@ -963,7 +982,9 @@ jobs:
           source "$RUNNER_TEMP/brama-lib.sh"
           back_to_main || { shot w7-no-shell; echo "::error::Could not get back to the main shell for Settings."; exit 1; }
           tap_text "Settings"; sleep 2
-          await_text "About" 15 scroll && tap_text "About"; sleep 2
+          await_text "About" 15 scroll \
+            || { shot w7-no-about; echo "::error::Settings never listed About."; exit 1; }
+          tap_text "About"; sleep 2
           await_text "patched build" 10 scroll
           check W7 "About says the patched build does not update itself" \
             "This is a patched build, so it doesn't update itself." \
@@ -1007,11 +1028,16 @@ jobs:
           FAM="#family%sBrama%s$BRAMA_RUN"
           BARE="Brama $BRAMA_RUN"
           search_for Mozart
-          open_menu_on_row "$F1_TITLE" && await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
-          await_text "New playlist" 10 && tap_text "New playlist"; sleep 2
+          open_menu_on_row "$F1_TITLE" || { shot w8-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
+          await_text "Add to playlist" 10 || { shot w8-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
+          tap_text "Add to playlist"; sleep 2
+          await_text "New playlist" 10 scroll \
+            || { shot w8-no-new; echo "::error::The picker's New playlist never appeared."; exit 1; }
+          tap_text "New playlist"; sleep 2
           tap_edit 0
           type "$FAM"
           adb shell input keyevent 111
+          adb shell input keyevent 61
           tap_text "Create"
           shot w8-family-created
 
@@ -1025,8 +1051,11 @@ jobs:
           check W8 "the family playlist belongs to the family (owner Family)" "Family" "$(jq -r '.owner // empty' <<<"$FAMROW")"
 
           search_for Mozart
-          open_menu_on_row "$F2_TITLE" && await_text "Add to playlist" 10 && tap_text "Add to playlist"; sleep 2
-          await_text "$BARE" 15 scroll
+          open_menu_on_row "$F2_TITLE" || { shot w8-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
+          await_text "Add to playlist" 10 || { shot w8-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
+          tap_text "Add to playlist"; sleep 2
+          await_text "$BARE" 15 scroll \
+            || { shot w8-no-family-row; echo "::error::The picker never listed the family playlist."; exit 1; }
           check W8 "the picker lists the family playlist" "$BARE" "$(screen_texts w8-picker | grep -m1 "$BARE" || echo none)"
           tap_text "$BARE"
           check W8 "the family playlist took the added song" "1" "$(await_count 1 playlist_entry_count "${FID:-none}")"
