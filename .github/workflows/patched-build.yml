@@ -554,6 +554,42 @@ jobs:
             done
             return 1
           }
+          # The switch beside a row, flipped only when it is off: "x y" to
+          # tap, or "on" when it already is.
+          switch_on_beside() { # switch_on_beside <row text>
+            dump switch >/dev/null
+            python3 - "$RUNNER_TEMP/brama-dumps/switch.xml" "$1" <<'PY'
+          import sys, re, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          want = sys.argv[2]
+          row = None
+          for node in root.iter("node"):
+              for value in (node.get("text"), node.get("content-desc")):
+                  if value and want in value:
+                      m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+                      if m:
+                          row = tuple(map(int, m.groups()))
+                          break
+          if row is None:
+              sys.exit(0)
+          best = None
+          for node in root.iter("node"):
+              if node.get("checkable") == "true":
+                  m = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", node.get("bounds", ""))
+                  if not m:
+                      continue
+                  x1, y1, x2, y2 = map(int, m.groups())
+                  cy = (y1 + y2) // 2
+                  if row[1] - 20 <= cy <= row[3] + 20 and x1 > row[0]:
+                      best = (node, ((x1 + x2) // 2, cy))
+          if best:
+              node, (x, y) = best
+              if node.get("checked") == "true":
+                  print("on")
+              else:
+                  print(x, y)
+          PY
+          }
           # The switch beside a row of settings text: the nearest checkable
           # node on the row's own height.
           toggle_beside() { # toggle_beside <row text>
@@ -653,15 +689,16 @@ jobs:
             echo "${v:-none}"
             return 1
           }
-          await_id() { # await_id <name> -> the playlist's id, once the server lists it
+          await_id() { # await_id <name> -> the playlist's id; loud when the server never lists it
             local i id
             for i in $(seq 1 8); do
               id="$(playlist_id_by_name "$1")"
               [ -n "$id" ] && { echo "$id"; return 0; }
               sleep 2
             done
-            echo ""
-            return 1
+            shot "no-id-${1// /-}"
+            echo "::error::The server never answered the id of playlist \"$1\" (run 44080662051 died here in silence)." >&2
+            exit 1
           }
 
           # The walks the steps share: open the app's search, and reach the
@@ -847,6 +884,32 @@ jobs:
           else
             echo "::notice::This server's log carries no request lines; the Home heading alone witnesses the sign-in."
           fi
+
+          # New playlists must reach the server for the walk's probes: the
+          # app keeps one it makes on the phone alone until this switch is
+          # on (PlaylistSync.created reads it before anything is sent), and
+          # playlists on the server are the whole point of the patch. The
+          # user sets it once, right after signing in (run 44080662051: the
+          # app made "Znalezione" beautifully, and the server never heard of
+          # it).
+          tap_text "Settings" || { shot s-settings; echo "::error::The Settings tab could not be tapped."; exit 1; }
+          await_text "Server and sync" 15 scroll \
+            || { shot s-no-server-page; echo "::error::Settings never listed Server and sync."; exit 1; }
+          tap_text "Server and sync" || { shot s-server-page; echo "::error::The Server and sync entry could not be tapped."; exit 1; }
+          sleep 2
+          await_text "Save new playlists to the server" 15 scroll \
+            || { shot s-no-playlists-switch; echo "::error::The server page never listed the playlists switch."; exit 1; }
+          sw="$(switch_on_beside "Save new playlists to the server")"
+          [ -n "$sw" ] || { shot s-playlists-switch; echo "::error::The Save new playlists to the server switch was not found."; exit 1; }
+          if [ "$sw" != "on" ]; then
+            adb shell input tap $sw || { shot s-playlists-switch; echo "::error::The playlists switch could not be flipped."; exit 1; }
+            sleep 2
+            sw="$(switch_on_beside "Save new playlists to the server")"
+            [ "$sw" = "on" ] || { shot s-playlists-switch; echo "::error::The playlists switch never turned on."; exit 1; }
+          fi
+          shot s-playlists-switch-on
+          check S "new playlists will be made on the server" "on" "${sw:-none}"
+          back_to_main || { shot s-no-main; echo "::error::Could not get back to the main shell after the switch."; exit 1; }
           verdict S
 
       # W1 (R1, a new playlist): search answers an outside song through the
