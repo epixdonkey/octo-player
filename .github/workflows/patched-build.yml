@@ -382,16 +382,31 @@ jobs:
               || { echo "::error::The patched app would not come forward."; exit 1; }
             sleep 3
           }
-          # BACK until the bottom bar answers: out of whatever the last step
-          # left open (the player W5 leaves behind), without killing anything.
+          # Home by preference, BACK only in need: a blind BACK walk landed
+          # on Settings (run 44101841939: the picker left a stack behind),
+          # and BACK from the main shell leaves the app altogether. When
+          # the bottom bar answers, its Home tab is tapped -- exact and
+          # clickable, and the run's own dump shows it reachable even from
+          # Settings -- and the page proves itself by its own words. Only a
+          # screen without the bar (a full dialog) gets BACK, two at most,
+          # and then the bar is looked for again.
           back_to_main() {
-            local i
+            local i backs=0 home
             for i in 1 2 3 4 5; do
               dump back >/dev/null
               cp "$RUNNER_TEMP/brama-dumps/back.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
-              [ -n "$(nodes_with "Settings" read)" ] && return 0
-              adb shell input keyevent 4
-              sleep 1
+              home="$(nodes_with "Home" tap)"
+              if [ -n "$home" ]; then
+                adb shell input tap $home
+                sleep 2
+                await_text "Edit Home" 8 && return 0
+              elif [ "$backs" -lt 2 ]; then
+                adb shell input keyevent 4
+                backs=$((backs+1))
+                sleep 1
+              else
+                return 1
+              fi
             done
             return 1
           }
@@ -1014,6 +1029,9 @@ jobs:
           tap_text "$W2_NAME" || { shot w2-open-row; echo "::error::The playlist row could not be tapped."; exit 1; }
           shot w2-added
           check W2 "the server playlist grew to three songs" "3" "$(await_count 3 playlist_entry_count "$W2_ID")"
+          # The picker leaves a page of its own on the stack (run
+          # 44101841939); walk home before asking for Library.
+          back_to_main || { shot w2-no-main; echo "::error::Could not get back to the main shell after the add."; exit 1; }
           open_playlists
           await_text "$W2_NAME" 15 scroll \
             || { shot w2-no-row; echo "::error::The picker never listed the existing playlist."; exit 1; }
