@@ -642,10 +642,10 @@ jobs:
             sleep 8
           }
           open_playlists() {
-            tap_text "Library"; sleep 2
+            tap_text "Library" || { shot lib-library; echo "::error::The Library could not be tapped."; exit 1; }; sleep 2
             await_text "Playlists" 10 scroll \
               || { shot open-playlists; echo "::error::The Library's Playlists entry never appeared."; exit 1; }
-            tap_text "Playlists"; sleep 2
+            tap_text "Playlists" || { shot lib-playlists; echo "::error::The Playlists could not be tapped."; exit 1; }; sleep 2
           }
           LIB
 
@@ -824,22 +824,36 @@ jobs:
           open_menu_on_row "$F1_TITLE" || { shot w1-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
           await_text "Add to playlist" 10 || { shot w1-menu; echo "::error::The found song's menu offers no Add to playlist."; exit 1; }
           check W1 "the found song's menu offers Add to playlist" "Add to playlist" "$(screen_texts w1-menu | grep -m1 "Add to playlist" || echo none)"
-          tap_text "Add to playlist"; sleep 2
-          await_text "New playlist" 10 scroll \
-            || { shot w1-no-new; echo "::error::The picker's New playlist never appeared."; exit 1; }
-          tap_text "New playlist"; sleep 2
+          tap_text "Add to playlist" || { shot w1-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
+          # The picker opens straight into its naming dialog (run 43996895386's
+          # dump: no "New playlist" button exists there); the dialog's own
+          # field marker is the honest thing to await.
+          await_text "Playlist name" 10 \
+            || { shot w1-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           tap_edit 0
           type "Znalezione"
           adb shell input keyevent 111
           adb shell input keyevent 61
-          tap_text "Create"; sleep 3
+          # The dialog relayouts once the keyboard is gone, and Create can end
+          # below the screen (run 43996895386: a bare tap then died in
+          # silence). Walk it back into view, then press it.
+          up=""
+          for i in 1 2 3; do
+            dump create-check >/dev/null
+            cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+            if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
+            adb shell input swipe 540 600 540 1800 400
+            sleep 1
+          done
+          [ -n "$up" ] || { shot w1-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
+          tap_text "Create" || { shot w1-create; echo "::error::The Create button could not be tapped."; exit 1; }; sleep 3
           shot w1-created
 
           open_playlists
-          await_text "Znalezione" 15 scroll
+          await_text "Znalezione" 15 scroll || true
           check W1 "the playlists page renders Znalezione" "Znalezione" "$(screen_texts w1-list | grep -m1 Znalezione || echo none)"
-          tap_text "Znalezione"; sleep 3
-          await_text "$F1_TITLE" 15 scroll
+          tap_text "Znalezione" || { shot w1-open; echo "::error::The Znalezione could not be tapped."; exit 1; }; sleep 3
+          await_text "$F1_TITLE" 15 scroll || true
           check W1 "the playlist renders the found song" "$F1_TITLE" "$(screen_texts w1-open | grep -F "$F1_TITLE" || echo none)"
           shot w1-playlist
 
@@ -858,17 +872,17 @@ jobs:
           search_for Mozart
           open_menu_on_row "$F1_TITLE" || { shot w2-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
           await_text "Add to playlist" 10 || { shot w2-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
-          tap_text "Add to playlist"; sleep 2
-          await_text "$W2_NAME" 15 scroll
+          tap_text "Add to playlist" || { shot w2-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
+          await_text "$W2_NAME" 15 scroll || true
           check W2 "the picker lists the existing library playlist" "$W2_NAME" "$(screen_texts w2-picker | grep -m1 "$W2_NAME" || echo none)"
-          tap_text "$W2_NAME"
+          tap_text "$W2_NAME" || { shot w2-open-row; echo "::error::The playlist row could not be tapped."; exit 1; }
           shot w2-added
           check W2 "the server playlist grew to three songs" "3" "$(await_count 3 playlist_entry_count "$W2_ID")"
           open_playlists
           await_text "$W2_NAME" 15 scroll \
             || { shot w2-no-row; echo "::error::The picker never listed the existing playlist."; exit 1; }
-          tap_text "$W2_NAME"; sleep 3
-          await_text "$F1_TITLE" 15 scroll
+          tap_text "$W2_NAME" || { shot w2-row; echo "::error::The row could not be tapped."; exit 1; }; sleep 3
+          await_text "$F1_TITLE" 15 scroll || true
           check W2 "the existing playlist renders the found song" "$F1_TITLE" "$(screen_texts w2-open | grep -F "$F1_TITLE" || echo none)"
           shot w2-playlist
           verdict W2
@@ -884,25 +898,39 @@ jobs:
           source "$RUNNER_TEMP/brama-lib.sh"
           W3_NAME="Mieszana $BRAMA_RUN"
           search_for Mozart
-          await_text "Mozart Bridge One" 15 scroll
+          await_text "Mozart Bridge One" 15 scroll || true
           open_menu_on_row "Mozart Bridge One" || { shot w3-no-menu; echo "::error::No menu opened on the first library row."; exit 1; }
           await_text "Select" 10 || { shot w3-no-select; echo "::error::The row's menu offers no Select action."; exit 1; }
-          tap_text "Select"; sleep 2
-          tap_text "Mozart Bridge Two"; sleep 1
-          tap_text "$F1_TITLE"; sleep 1
-          tap_text "$F2_TITLE"; sleep 1
+          tap_text "Select" || { shot w3-select; echo "::error::The Select could not be tapped."; exit 1; }; sleep 2
+          tap_text "Mozart Bridge Two" || { shot w3-lib2; echo "::error::The Mozart Bridge Two could not be tapped."; exit 1; }; sleep 1
+          tap_text "$F1_TITLE" || { shot w3-f1; echo "::error::The row could not be tapped."; exit 1; }; sleep 1
+          tap_text "$F2_TITLE" || { shot w3-f2; echo "::error::The row could not be tapped."; exit 1; }; sleep 1
           shot w3-selected
           await_text "Add to playlist" 10 || { shot w3-no-bar; echo "::error::The selection bar did not appear."; exit 1; }
           check W3 "the selection bar offers Add to playlist" "Add to playlist" "$(screen_texts w3-bar | grep -m1 "Add to playlist" || echo none)"
-          tap_text "Add to playlist"; sleep 2
-          await_text "New playlist" 10 scroll \
-            || { shot w3-no-new; echo "::error::The picker's New playlist never appeared."; exit 1; }
-          tap_text "New playlist"; sleep 2
+          tap_text "Add to playlist" || { shot w3-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
+          # The picker opens straight into its naming dialog (run 43996895386's
+          # dump: no "New playlist" button exists there); the dialog's own
+          # field marker is the honest thing to await.
+          await_text "Playlist name" 10 \
+            || { shot w3-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           tap_edit 0
           type "${W3_NAME// /%s}"
           adb shell input keyevent 111
           adb shell input keyevent 61
-          tap_text "Create"
+          # The dialog relayouts once the keyboard is gone, and Create can end
+          # below the screen (run 43996895386: a bare tap then died in
+          # silence). Walk it back into view, then press it.
+          up=""
+          for i in 1 2 3; do
+            dump create-check >/dev/null
+            cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+            if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
+            adb shell input swipe 540 600 540 1800 400
+            sleep 1
+          done
+          [ -n "$up" ] || { shot w3-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
+          tap_text "Create" || { shot w3-create; echo "::error::The Create button could not be tapped."; exit 1; }
           shot w3-created
           PID="$(await_id "$W3_NAME")"
           [ -n "$PID" ] && check W3 "getPlaylist answers the mixed playlist" "id" "id $PID" \
@@ -920,10 +948,11 @@ jobs:
           W3_NAME="Mieszana $BRAMA_RUN"
           search_for Mozart
           open_menu_on_row "$F1_TITLE" || { shot w4-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
-          await_text "Add to last playlist" 10
+          await_text "Add to last playlist" 10 \
+            || { shot w4-no-last; echo "::error::The menu offers no Add to last playlist."; exit 1; }
           check W4 "the menu names the last playlist" "Add to last playlist: $W3_NAME" \
             "$(screen_texts w4-menu | grep -m1 "Add to last playlist" || echo none)"
-          tap_text "Add to last playlist"
+          tap_text "Add to last playlist" || { shot w4-last; echo "::error::The Add to last playlist action could not be tapped."; exit 1; }
           shot w4-done
           PID="$(await_id "$W3_NAME")"
           check W4 "the last playlist grew to five songs, no picker opened" "5" "$(await_count 5 playlist_entry_count "${PID:-none}")"
@@ -937,32 +966,44 @@ jobs:
           source "$RUNNER_TEMP/brama-lib.sh"
           W5_NAME="Kolejka$BRAMA_RUN"
           search_for Mozart
-          await_text "Mozart Bridge One" 15 scroll
-          tap_text "Mozart Bridge One"; sleep 4   # plays, so the player and its queue exist
+          await_text "Mozart Bridge One" 15 scroll || true
+          tap_text "Mozart Bridge One" || { shot w5-lib1; echo "::error::The Mozart Bridge One could not be tapped."; exit 1; }; sleep 4   # plays, so the player and its queue exist
           open_menu_on_row "$F1_TITLE" || { shot w5-no-menu; echo "::error::No menu opened on the row."; exit 1; }
           await_text "Play next" 10 || { shot w5-no-playnext; echo "::error::The menu offers no Play next."; exit 1; }
-          tap_text "Play next"; sleep 2
+          tap_text "Play next" || { shot w5-playnext; echo "::error::The Play next could not be tapped."; exit 1; }; sleep 2
           open_menu_on_row "$F2_TITLE" || { shot w5-no-menu; echo "::error::No menu opened on the row."; exit 1; }
           await_text "Play next" 10 || { shot w5-no-playnext; echo "::error::The menu offers no Play next."; exit 1; }
-          tap_text "Play next"; sleep 2
+          tap_text "Play next" || { shot w5-playnext; echo "::error::The Play next could not be tapped."; exit 1; }; sleep 2
           adb shell input keyevent 111   # the keyboard must not cover the player
           shot w5-before-player
 
           tap_bottom; sleep 2            # the now playing bar opens the player
           shot w5-player
           await_text "Up next" 8 || tap_bottom
-          tap_text "Up next"; sleep 2
+          tap_text "Up next" || { shot w5-upnext; echo "::error::The Up next could not be tapped."; exit 1; }; sleep 2
           shot w5-queue
           await_text "More" 10 || { shot w5-no-more; echo "::error::The queue sheet's More never appeared."; exit 1; }
-          tap_text "More"; sleep 2
+          tap_text "More" || { shot w5-more; echo "::error::The More could not be tapped."; exit 1; }; sleep 2
           await_text "Save as playlist" 10 \
             || { shot w5-no-save; echo "::error::The More menu offers no Save as playlist."; exit 1; }
-          tap_text "Save as playlist"; sleep 2
+          tap_text "Save as playlist" || { shot w5-save; echo "::error::The Save as playlist could not be tapped."; exit 1; }; sleep 2
           tap_edit 0
           type "$W5_NAME"
           adb shell input keyevent 111
           adb shell input keyevent 61
-          tap_text "Create"
+          # The dialog relayouts once the keyboard is gone, and Create can end
+          # below the screen (run 43996895386: a bare tap then died in
+          # silence). Walk it back into view, then press it.
+          up=""
+          for i in 1 2 3; do
+            dump create-check >/dev/null
+            cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+            if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
+            adb shell input swipe 540 600 540 1800 400
+            sleep 1
+          done
+          [ -n "$up" ] || { shot w5-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
+          tap_text "Create" || { shot w5-create; echo "::error::The Create button could not be tapped."; exit 1; }
           shot w5-saved
           PID="$(await_id "$W5_NAME")"
           [ -n "$PID" ] && check W5 "getPlaylist answers the queue's playlist" "id" "id $PID" \
@@ -981,11 +1022,11 @@ jobs:
           set -euo pipefail
           source "$RUNNER_TEMP/brama-lib.sh"
           back_to_main || { shot w7-no-shell; echo "::error::Could not get back to the main shell for Settings."; exit 1; }
-          tap_text "Settings"; sleep 2
+          tap_text "Settings" || { shot w7-settings; echo "::error::The Settings could not be tapped."; exit 1; }; sleep 2
           await_text "About" 15 scroll \
             || { shot w7-no-about; echo "::error::Settings never listed About."; exit 1; }
-          tap_text "About"; sleep 2
-          await_text "patched build" 10 scroll
+          tap_text "About" || { shot w7-about; echo "::error::The About could not be tapped."; exit 1; }; sleep 2
+          await_text "patched build" 10 scroll || true
           check W7 "About says the patched build does not update itself" \
             "This is a patched build, so it doesn't update itself." \
             "$(screen_texts w7-about | grep -m1 "patched build" || echo none)"
@@ -1017,7 +1058,7 @@ jobs:
 
           launch
           open_playlists
-          await_text "Załóżne" 20 scroll
+          await_text "Załóżne" 20 scroll || true
           check W8 "the app renders the ogonki and the emoji" "źródła ó" "$(screen_texts w8-render | grep -m1 "źródła ó" || echo none)"
           shot w8-renamed
 
@@ -1030,15 +1071,29 @@ jobs:
           search_for Mozart
           open_menu_on_row "$F1_TITLE" || { shot w8-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
           await_text "Add to playlist" 10 || { shot w8-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
-          tap_text "Add to playlist"; sleep 2
-          await_text "New playlist" 10 scroll \
-            || { shot w8-no-new; echo "::error::The picker's New playlist never appeared."; exit 1; }
-          tap_text "New playlist"; sleep 2
+          tap_text "Add to playlist" || { shot w8-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
+          # The picker opens straight into its naming dialog (run 43996895386's
+          # dump: no "New playlist" button exists there); the dialog's own
+          # field marker is the honest thing to await.
+          await_text "Playlist name" 10 \
+            || { shot w8-no-dialog; echo "::error::The playlist naming dialog never appeared."; exit 1; }
           tap_edit 0
           type "$FAM"
           adb shell input keyevent 111
           adb shell input keyevent 61
-          tap_text "Create"
+          # The dialog relayouts once the keyboard is gone, and Create can end
+          # below the screen (run 43996895386: a bare tap then died in
+          # silence). Walk it back into view, then press it.
+          up=""
+          for i in 1 2 3; do
+            dump create-check >/dev/null
+            cp "$RUNNER_TEMP/brama-dumps/create-check.xml" "$RUNNER_TEMP/brama-dumps/tap.xml"
+            if [ -n "$(nodes_with "Create" tap)" ]; then up=1; break; fi
+            adb shell input swipe 540 600 540 1800 400
+            sleep 1
+          done
+          [ -n "$up" ] || { shot w8-create-offscreen; echo "::error::The Create button never came into view."; exit 1; }
+          tap_text "Create" || { shot w8-create; echo "::error::The Create button could not be tapped."; exit 1; }
           shot w8-family-created
 
           FID="$(await_id "$BARE")"
@@ -1053,11 +1108,11 @@ jobs:
           search_for Mozart
           open_menu_on_row "$F2_TITLE" || { shot w8-no-menu; echo "::error::No menu opened on the found row."; exit 1; }
           await_text "Add to playlist" 10 || { shot w8-no-add; echo "::error::The menu offers no Add to playlist."; exit 1; }
-          tap_text "Add to playlist"; sleep 2
+          tap_text "Add to playlist" || { shot w8-add; echo "::error::The Add to playlist could not be tapped."; exit 1; }; sleep 2
           await_text "$BARE" 15 scroll \
             || { shot w8-no-family-row; echo "::error::The picker never listed the family playlist."; exit 1; }
           check W8 "the picker lists the family playlist" "$BARE" "$(screen_texts w8-picker | grep -m1 "$BARE" || echo none)"
-          tap_text "$BARE"
+          tap_text "$BARE" || { shot w8-family-tap; echo "::error::The family playlist row could not be tapped."; exit 1; }
           check W8 "the family playlist took the added song" "1" "$(await_count 1 playlist_entry_count "${FID:-none}")"
 
           curl -fsS "$BRAMA_BASE/rest/updatePlaylist.view?playlistId=$(urlenc "$FID")&name=$(urlenc "#family $BARE dwa")&$BRAMA_AUTH" \
