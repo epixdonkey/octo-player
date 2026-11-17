@@ -780,10 +780,13 @@ jobs:
           fi
           # Home's tab lives in the bottom bar of every screen and witnessed
           # nothing (run 43933032189 passed on it while the form still
-          # stood); the Home page's own heading does.
-          await_text "Music on this phone" 20 || true
+          # stood). The page's own witness is "Edit Home": it shows only on
+          # a signed-in Home with content (run 43954188181's dumps: the
+          # signed-in page has it, the empty one says "Music on this phone"
+          # instead).
+          await_text "Edit Home" 20 || true
           shot signed-in
-          check S "the patched app signed in to the bridge" "Music on this phone" "$(screen_texts signed-in | grep -m1 "Music on this phone" || echo none)"
+          check S "the patched app signed in to the bridge" "Edit Home" "$(screen_texts signed-in | grep -m1 "Edit Home" || echo none)"
 
           # And the bridge heard it: only what the sign-in itself moved. A
           # log that carries no request lines at all says nothing either
