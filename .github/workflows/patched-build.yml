@@ -28,6 +28,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # the release below carries the APK to the Releases page
     steps:
       - uses: actions/checkout@v7
         with:
@@ -85,6 +87,18 @@ jobs:
           name: octo-android-patched
           path: app/build/outputs/apk/patched/app-patched.apk
           if-no-files-found: error
+      # The Releases page carries the newest APK under one rolling tag, so a
+      # phone (or Obtainium) can always fetch the same link.
+      - name: Put the APK on the Releases page
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk="Octo-${OCTO_VERSION:-0.2.0.${OCTO_BUILD}}-patched.apk"
+          cp app/build/outputs/apk/patched/app-patched.apk "$apk"
+          gh release delete patched-latest --cleanup-tag -y 2>/dev/null || true
+          gh release create patched-latest "$apk" -R "$GITHUB_REPOSITORY" \
+            --title "Octo Player patched-latest (fleet build)" \
+            --notes "Rolling release: the newest green build of the fork. Songs found online go in playlists on Android, beside the official app. The signing key never changes, so a newer build installs right over an older one. See Actions for the exact run."
 
   # The Brama: the patched APK from this run's artifact, beside the official
   # 1.11.0, on an emulator that talks to an octo bridge standing on the runner
