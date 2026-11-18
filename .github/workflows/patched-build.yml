@@ -87,18 +87,27 @@ jobs:
           name: octo-android-patched
           path: app/build/outputs/apk/patched/app-patched.apk
           if-no-files-found: error
-      # The Releases page carries the newest APK under one rolling tag, so a
-      # phone (or Obtainium) can always fetch the same link.
+      # The Releases page carries each green build under a versioned tag
+      # (patched-v0.2.0.N — the build number counts up), so Obtainium or any
+      # updater sees a new version exactly when a new build lands. One fleet
+      # release exists at a time: older patched-v* tags and the retired
+      # patched-latest rolling tag are cleaned up here.
       - name: Put the APK on the Releases page
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          apk="Octo-${OCTO_VERSION:-0.2.0.${OCTO_BUILD}}-patched.apk"
+          version="${OCTO_VERSION:-0.2.0.${OCTO_BUILD}}"
+          tag="patched-v${version}"
+          apk="Octo-${version}-patched.apk"
           cp app/build/outputs/apk/patched/app-patched.apk "$apk"
           gh release delete patched-latest --cleanup-tag -y 2>/dev/null || true
-          gh release create patched-latest "$apk" -R "$GITHUB_REPOSITORY" \
-            --title "Octo Player patched-latest (fleet build)" \
-            --notes "Rolling release: the newest green build of the fork. Songs found online go in playlists on Android, beside the official app. The signing key never changes, so a newer build installs right over an older one. See Actions for the exact run."
+          for old in $(gh release list --json tagName --jq '.[].tagName' | grep '^patched-v' | grep -vx "$tag"); do
+            gh release delete "$old" --cleanup-tag -y 2>/dev/null || true
+          done
+          gh release delete "$tag" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$tag" "$apk" -R "$GITHUB_REPOSITORY" \
+            --title "Octo Player ${version}-patched (fleet build)" \
+            --notes "Fleet build of the fork: upstream's own code, every feature of the app (songs found online in playlists included — that one needs Octo server 2026.11.15), built and tested by CI on every push. Signed with the fleet key, which never changes, so a newer build installs right over an older one, beside the official app. Commit ${GITHUB_SHA}, CI run ${GITHUB_RUN_ID}."
 
   # The Brama: the patched APK from this run's artifact, beside the official
   # 1.11.0, on an emulator that talks to an octo bridge standing on the runner
