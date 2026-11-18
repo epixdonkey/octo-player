@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The patched app stands beside the official one on the launcher, both
+     saying just "Octo" until now; this overlay gives the fleet's own build
+     its own label, so the two are told apart at a glance. -->
+<resources>
+    <string name="app_name">Octo - dev</string>
+</resources>
