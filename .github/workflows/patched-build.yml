@@ -20,7 +20,7 @@ name: patched-build
 on:
   workflow_dispatch:
   push:
-    branches: [feature/octo-player-find-playlists, dev]
+    branches: [dev]
 
 permissions:
   contents: read
