@@ -42,7 +42,10 @@ jobs:
           java-version: 17
 
       - name: Build number
-        run: echo "OCTO_BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+        run: |
+          echo "OCTO_BUILD=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          ver=$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null | sed 's/^v//')
+          echo "OCTO_VERSION=${ver:-0.2.0}" >> "$GITHUB_ENV"
 
       - name: Tests
         run: ./gradlew :shared:core:allTests :app:testDebugUnitTest --no-daemon
@@ -61,7 +64,7 @@ jobs:
           OCTO_PATCHED_KEYSTORE_PASSWORD: ${{ secrets.OCTO_PATCHED_KEYSTORE_PASSWORD }}
           OCTO_PATCHED_KEY_ALIAS: ${{ secrets.OCTO_PATCHED_KEY_ALIAS }}
           OCTO_PATCHED_KEY_PASSWORD: ${{ secrets.OCTO_PATCHED_KEY_PASSWORD }}
-        run: ./gradlew :app:assemblePatched -PoctoBuild=${OCTO_BUILD} --no-daemon
+        run: ./gradlew :app:assemblePatched -PoctoBuild=${OCTO_BUILD} -PoctoAndroidVersion=${OCTO_VERSION} --no-daemon
 
       - name: The APK is signed
         run: |
@@ -87,27 +90,21 @@ jobs:
           name: octo-android-patched
           path: app/build/outputs/apk/patched/app-patched.apk
           if-no-files-found: error
-      # The Releases page carries each green build under a versioned tag
-      # (patched-v0.2.0.N — the build number counts up), so Obtainium or any
-      # updater sees a new version exactly when a new build lands. One fleet
-      # release exists at a time: older patched-v* tags and the retired
-      # patched-latest rolling tag are cleaned up here.
+      # The Releases page always carries the fleet's APK under the same tag
+      # and the same file name, Octo-patched.apk, so the link never changes;
+      # the app's version lives inside the APK and in the release notes.
       - name: Put the APK on the Releases page
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="${OCTO_VERSION:-0.2.0.${OCTO_BUILD}}"
-          tag="patched-v${version}"
-          apk="Octo-${version}-patched.apk"
-          cp app/build/outputs/apk/patched/app-patched.apk "$apk"
           gh release delete patched-latest --cleanup-tag -y 2>/dev/null || true
-          for old in $(gh release list --json tagName --jq '.[].tagName' | grep '^patched-v' | grep -vx "$tag"); do
+          for old in $(gh release list --json tagName --jq '.[].tagName' | grep '^patched-v'); do
             gh release delete "$old" --cleanup-tag -y 2>/dev/null || true
           done
-          gh release delete "$tag" --cleanup-tag -y 2>/dev/null || true
-          gh release create "$tag" "$apk" -R "$GITHUB_REPOSITORY" \
-            --title "Octo Player ${version}-patched (fleet build)" \
-            --notes "Fleet build of the fork: upstream's own code, every feature of the app (songs found online in playlists included — that one needs Octo server 2026.11.15), built and tested by CI on every push. Signed with the fleet key, which never changes, so a newer build installs right over an older one, beside the official app. Commit ${GITHUB_SHA}, CI run ${GITHUB_RUN_ID}."
+          cp app/build/outputs/apk/patched/app-patched.apk Octo-patched.apk
+          gh release create patched-latest Octo-patched.apk -R "$GITHUB_REPOSITORY" \
+            --title "Octo Player patched (fleet build)" \
+            --notes "The fleet's own build of the fork: upstream's own code in full, beside the official app, signed with the fleet key, which never changes, so this installs right over any older fleet build. Songs found online in playlists need Octo server 2026.11.15. App version ${OCTO_VERSION} (build ${OCTO_BUILD}), commit ${GITHUB_SHA}, CI run ${GITHUB_RUN_ID}."
 
   # The Brama: the patched APK from this run's artifact, beside the official
   # 1.11.0, on an emulator that talks to an octo bridge standing on the runner
