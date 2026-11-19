@@ -18,9 +18,9 @@
 name: patched-build
 
 on:
+  # The APK builds on the Admiral's order alone (fleet law §5): a push —
+  # code, docs, anything — never starts a build by itself.
   workflow_dispatch:
-  push:
-    branches: [dev]
 
 permissions:
   contents: read

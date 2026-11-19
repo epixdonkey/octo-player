@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026.11.19 — The fork goes dormant: his app does it all
+
+### 1. The fleet flies the developer's own app; this fork becomes a drawer (`chore`)
+
+With the fleet's server carrying `octoPlaylistSongs` — upstream's own held
+playlists, migrated in place under the same ids — the developer's app
+1.13.0 does everything the patched app was kept for: songs found online go
+into playlists, downloads land and bind, and the stations the fleet's
+server still carries (YouTube Music rows without a Last.fm key, live
+radio, the playlist download doors, family playlists) reach the phone
+through his app unchanged, because the server serves them. The fleet now
+installs his app from his own releases. This fork stays as a drawer: its
+working branch is `dev`, like the server's, and the day his app breaks or
+lags behind a needed fix, one merge and one build bring the patched app
+back.
+
+### 2. Beside the official "Octo", the fleet's build reads "Octo - dev" (`build(app)`)
+
+Two Octos on one launcher are told apart at a glance now: the patched
+build type carries its own label overlay
+(`app/src/patched/res/values/strings.xml`). Nothing else changes — the
+file stays `Octo-patched.apk` under the same `patched-latest` tag, and
+the version lives inside the APK.
+
+### 3. The APK builds on order alone (`ci`)
+
+The push trigger is gone from `patched-build.yml`: a `workflow_dispatch`
+is the only way a build starts. The fleet's law always said the APK
+builds when ordered, never because a branch or a document moved — now
+the workflow says it too.
+
 ## 2026.11.17 — Upstream apps 1.13.0: the fork's playlist patch retires
 
 ### 1. Everything upstream apps 1.13.0, and the developer's own songs found online in playlists in place of this fork's patch (`chore`)
